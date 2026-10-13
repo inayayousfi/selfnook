@@ -39,22 +39,23 @@ func (a api) header() string {
 // do sends body, when not nil, as JSON and returns the status and answer.
 // A status of 0 means Jellyfin did not answer.
 func (a api) do(method, path string, body any) (int, string, error) {
-	args := []string{"curl", "-sS", "-X", method, "-H", a.header(), "-w", "\n%{http_code}"}
+	headers := []string{a.header()}
+	data := ""
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
 			return 0, "", err
 		}
-		args = append(args, "-H", "Content-Type: application/json", "--data-binary", string(encoded))
+		headers, data = append(headers, "Content-Type: application/json"), string(encoded)
 	}
-	args = append(args, "http://localhost:"+strconv.Itoa(port)+baseURL+path)
-	result, err := a.e.Runtime.Exec(service, args...)
+	url := "http://localhost:" + strconv.Itoa(port) + baseURL + path
+	result, err := a.e.Runtime.ExecInput(service, app.CurlInput(headers, data), "curl", "-sS", "-X", method, "-w", "\n%{http_code}", "--config", "-", url)
 	if err != nil {
 		return 0, "", err
 	}
-	answer, code, _ := strings.Cut(strings.TrimRight(result.Stdout, "\n"), "\n")
-	if code == "" {
-		answer, code = "", answer
+	answer, code := "", strings.TrimRight(result.Stdout, "\n")
+	if last := strings.LastIndex(code, "\n"); last >= 0 {
+		answer, code = code[:last], code[last+1:]
 	}
 	status, _ := strconv.Atoi(strings.TrimSpace(code))
 	return status, answer, nil

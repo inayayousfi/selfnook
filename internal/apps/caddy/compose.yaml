@@ -6,7 +6,9 @@ services:
     restart: unless-stopped
     ports:
       - "80:80/tcp"
+{{- if ne (.Values.Get "ACCESS_MODE") "local"}}
       - "443:443/tcp"
+{{- end}}
 {{- range .OwnPorts}}
       - "{{.}}:{{.}}/tcp"
 {{- end}}

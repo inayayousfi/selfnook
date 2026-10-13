@@ -25,6 +25,9 @@ type Cmd struct {
 	// Env adds environment variables to the program's own environment,
 	// replacing variables of the same name.
 	Env map[string]string
+	// Stdin is the program's input, which keeps secrets out of its
+	// arguments, where any account on the computer can read them.
+	Stdin string
 }
 
 type Result struct {
@@ -71,6 +74,9 @@ func (s *OS) Run(c Cmd) (Result, error) {
 		for key, value := range c.Env {
 			command.Env = append(command.Env, key+"="+value)
 		}
+	}
+	if c.Stdin != "" {
+		command.Stdin = strings.NewReader(c.Stdin)
 	}
 	var stdout, stderr bytes.Buffer
 	run := command.Run

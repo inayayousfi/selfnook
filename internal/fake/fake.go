@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -13,12 +14,14 @@ import (
 	"github.com/inayayousfi/selfnook/internal/shell"
 )
 
-// Shell records every command and the environment values it received.
-// Respond, when set, chooses each result.
+// Shell records every command with the environment values and the input it
+// received. Respond, when set, chooses each result; the command it answers
+// is the last one recorded.
 type Shell struct {
 	mu       sync.Mutex
 	Commands [][]string
 	Envs     []map[string]string
+	Inputs   []string
 	Respond  func(args []string) shell.Result
 }
 
@@ -26,6 +29,7 @@ func (s *Shell) Run(c shell.Cmd) (shell.Result, error) {
 	s.mu.Lock()
 	s.Commands = append(s.Commands, slices.Clone(c.Args))
 	s.Envs = append(s.Envs, c.Env)
+	s.Inputs = append(s.Inputs, c.Stdin)
 	s.mu.Unlock()
 	result := shell.Result{}
 	if s.Respond != nil {
@@ -35,6 +39,25 @@ func (s *Shell) Run(c shell.Cmd) (shell.Result, error) {
 		return result, &shell.ExitError{Args: c.Args, Code: result.Code}
 	}
 	return result, nil
+}
+
+// LastInput is the input of the last recorded command.
+func (s *Shell) LastInput() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Inputs[len(s.Inputs)-1]
+}
+
+// CurlBody is the request body in curl's input, as app.CurlInput writes it,
+// or "" when the input has none.
+func CurlBody(input string) string {
+	for _, line := range strings.Split(input, "\n") {
+		if quoted, ok := strings.CutPrefix(line, "data-binary = "); ok {
+			body, _ := strconv.Unquote(quoted)
+			return body
+		}
+	}
+	return ""
 }
 
 // Lines returns each recorded command joined by spaces.

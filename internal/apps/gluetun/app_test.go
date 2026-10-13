@@ -75,15 +75,12 @@ apikey = "control"
 	}
 }
 
-// The guided providers use OpenVPN, and each needs its service login.
-func TestValidationNeedsOpenVPNAndTheServiceLogin(t *testing.T) {
+// The guided providers use OpenVPN.
+func TestValidationNeedsOpenVPN(t *testing.T) {
 	values := newValues()
 	values.Set("VPN_TYPE", "openvpn")
 	values.Set(providerKey, "nordvpn")
 	values.Set(userKey, "user")
-	if err := validate(values); err == nil || err.Error() != "Missing required VPN values: VPN_OPENVPN_PASSWORD" {
-		t.Errorf("err = %v", err)
-	}
 	values.Set(passwordKey, "secret")
 	if err := validate(values); err != nil {
 		t.Errorf("complete values rejected: %v", err)

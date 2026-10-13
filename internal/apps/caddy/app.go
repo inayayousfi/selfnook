@@ -7,7 +7,6 @@ import (
 	"errors"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/inayayousfi/selfnook/internal/app"
@@ -187,7 +186,7 @@ func askAccess(e *app.Env) error {
 		answers, err := e.UI.Ask(flow.Screen{
 			Title: "Own domain",
 			Body: `1. At your domain provider, create an A record that points your chosen name to this network's public IP address.
-2. On your router, forward TCP ports ` + forwardedPorts(e.Routes) + ` to this computer.
+2. On your router, forward TCP ports ` + app.List(servedPorts(e.Values, e.Routes)) + ` to this computer.
 3. The following prompt requests the name, for example media.example.com.
 
 Let's Encrypt connects to this computer through those ports to issue the certificate. Until both steps are done, the pages do not open.`,
@@ -211,15 +210,6 @@ Let's Encrypt connects to this computer through those ports to issue the certifi
 	return e.SaveValues()
 }
 
-// forwardedPorts lists every port Caddy publishes, as the router must forward them.
-func forwardedPorts(routes []app.Route) string {
-	ports := []string{"80", "443"}
-	for _, port := range app.OwnPorts(routes) {
-		ports = append(ports, strconv.Itoa(port))
-	}
-	return app.List(ports)
-}
-
 func prepare(e *app.Env) ([]string, error) {
 	certChanged := false
 	if e.Values.Get(modeKey) == Tailscale {
@@ -233,11 +223,7 @@ func prepare(e *app.Env) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	content, err := Caddyfile(e.Values, e.Routes, check)
-	if err != nil {
-		return nil, err
-	}
-	configChanged, err := files.WriteIfChanged(e.ConfigPath("caddy", "Caddyfile"), []byte(content))
+	configChanged, err := files.WriteIfChanged(e.ConfigPath("caddy", "Caddyfile"), []byte(Caddyfile(e.Values, e.Routes, check)))
 	if err != nil {
 		return nil, err
 	}

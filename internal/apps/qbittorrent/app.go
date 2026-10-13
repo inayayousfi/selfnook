@@ -51,9 +51,10 @@ var App = &app.App{
 	Implementations: []app.Implementation{{
 		From: "5.2.3", Until: "5.2.3",
 		Provides: []role.Offer{role.Provide(role.Downloads, func(role.Values, role.Set) role.DownloadClient { return client{} })},
+		// qBittorrent runs behind the VPN, so it is stopped while Prepare
+		// edits its settings file, which it rewrites on exit.
 		Prepare: func(e *app.Env) ([]string, error) {
-			_, err := WriteLoginBypass(e.ConfigPath(configFile...))
-			return nil, err
+			return nil, WriteLoginBypass(e.ConfigPath(configFile...))
 		},
 		Setup: setup,
 		Routes: func(_ app.Values, r role.Set) []app.Route {
@@ -131,15 +132,15 @@ func Guide(accessURL, adminUser, adminPassword string) flow.Screen {
 var configFile = []string{"qbittorrent", "qBittorrent", "config", "qBittorrent.conf"}
 
 // WriteLoginBypass lets requests from the stack network skip qBittorrent's
-// login, keeping every other setting. It reports whether the file changed.
-func WriteLoginBypass(path string) (bool, error) {
+// login, keeping every other setting.
+func WriteLoginBypass(path string) error {
 	wanted := [][2]string{
 		{`WebUI\AuthSubnetWhitelistEnabled`, "true"},
 		{`WebUI\AuthSubnetWhitelist`, runtime.NetworkSubnet},
 	}
 	originalBytes, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
+		return err
 	}
 	original := string(originalBytes)
 	lines := splitLines(original)
@@ -172,7 +173,8 @@ func WriteLoginBypass(path string) (bool, error) {
 		section = append(section, setting[0]+"="+setting[1])
 	}
 	result := append(append(append([]string{}, lines[:start]...), section...), lines[end:]...)
-	return files.WriteIfChanged(path, []byte(strings.Join(result, "\n")+"\n"))
+	_, err = files.WriteIfChanged(path, []byte(strings.Join(result, "\n")+"\n"))
+	return err
 }
 
 // splitLines splits like Python's str.splitlines for "\n" and "\r\n" endings.

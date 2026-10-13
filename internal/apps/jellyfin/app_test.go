@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -93,15 +92,16 @@ func TestMissingBaseURLIsWrittenWhileJellyfinIsStopped(t *testing.T) {
 }
 
 // pluginHost answers the plugin's settings request with saved, records the
-// settings sent, and answers every other request with an empty object.
-func pluginHost(saved string, sent *[]string) func([]string) shell.Result {
+// settings sent through sh, and answers every other request with an empty
+// object.
+func pluginHost(sh *fake.Shell, saved string, sent *[]string) func([]string) shell.Result {
 	return func(args []string) shell.Result {
 		address := args[len(args)-1]
 		switch {
 		case strings.HasSuffix(address, "/sso/OID/Get"):
 			return shell.Result{Stdout: saved + "\n200\n"}
 		case strings.Contains(address, "/sso/OID/Add/"):
-			*sent = append(*sent, args[slices.Index(args, "--data-binary")+1])
+			*sent = append(*sent, fake.CurlBody(sh.LastInput()))
 			return shell.Result{Stdout: "\n204\n"}
 		}
 		return shell.Result{Stdout: "{}\n200\n"}
@@ -140,7 +140,8 @@ func signInEnv(sh *fake.Shell) *app.Env {
 // rest points the plugin at Authentik with its administrator group.
 func TestSignInSettingsKeepAccountLinks(t *testing.T) {
 	var sent []string
-	sh := &fake.Shell{Respond: pluginHost(`{"authentik": {"CanonicalLinks": {"ana": "0f8fad5b-d9cb-469f-a165-70867728950e"}, "OidSecret": "old"}}`, &sent)}
+	sh := &fake.Shell{}
+	sh.Respond = pluginHost(sh, `{"authentik": {"CanonicalLinks": {"ana": "0f8fad5b-d9cb-469f-a165-70867728950e"}, "OidSecret": "old"}}`, &sent)
 	if err := applySignIn(api{e: signInEnv(sh)}, address{}, signInService{}); err != nil {
 		t.Fatal(err)
 	}
@@ -171,12 +172,13 @@ func TestSignInSettingsKeepAccountLinks(t *testing.T) {
 // Jellyfin's files unchanged.
 func TestMatchingSignInSettingsAreNotSent(t *testing.T) {
 	var sent []string
-	sh := &fake.Shell{Respond: pluginHost(`{}`, &sent)}
+	sh := &fake.Shell{}
+	sh.Respond = pluginHost(sh, `{}`, &sent)
 	e := signInEnv(sh)
 	if err := applySignIn(api{e: e}, address{}, signInService{}); err != nil {
 		t.Fatal(err)
 	}
-	sh.Respond = pluginHost(`{"authentik": `+sent[0]+`}`, &sent)
+	sh.Respond = pluginHost(sh, `{"authentik": `+sent[0]+`}`, &sent)
 	if err := applySignIn(api{e: e}, address{}, signInService{}); err != nil {
 		t.Fatal(err)
 	}
@@ -199,13 +201,13 @@ func TestPluginWithAnotherChecksumIsRefused(t *testing.T) {
 }
 
 // configHost answers Jellyfin's server settings request with saved and
-// records the settings sent back.
-func configHost(saved string, sent *[]string) func([]string) shell.Result {
+// records the settings sent back through sh.
+func configHost(sh *fake.Shell, saved string, sent *[]string) func([]string) shell.Result {
 	return func(args []string) shell.Result {
 		address := args[len(args)-1]
 		if strings.HasSuffix(address, "/System/Configuration") {
-			if i := slices.Index(args, "--data-binary"); i >= 0 {
-				*sent = append(*sent, args[i+1])
+			if body := fake.CurlBody(sh.LastInput()); body != "" {
+				*sent = append(*sent, body)
 				return shell.Result{Stdout: "\n204\n"}
 			}
 			return shell.Result{Stdout: saved + "\n200\n"}
@@ -218,7 +220,8 @@ func configHost(saved string, sent *[]string) func([]string) shell.Result {
 // name chosen in Jellyfin stays.
 func TestServerIsNamedOnlyWhenUnnamed(t *testing.T) {
 	var sent []string
-	sh := &fake.Shell{Respond: configHost(`{"ServerName": "", "EnableMetrics": true}`, &sent)}
+	sh := &fake.Shell{}
+	sh.Respond = configHost(sh, `{"ServerName": "", "EnableMetrics": true}`, &sent)
 	if err := ensureServerName(api{e: signInEnv(sh)}); err != nil {
 		t.Fatal(err)
 	}
@@ -227,8 +230,20 @@ func TestServerIsNamedOnlyWhenUnnamed(t *testing.T) {
 		t.Fatalf("sent %v", sent)
 	}
 	sent = nil
-	sh.Respond = configHost(`{"ServerName": "Living room"}`, &sent)
+	sh.Respond = configHost(sh, `{"ServerName": "Living room"}`, &sent)
 	if err := ensureServerName(api{e: signInEnv(sh)}); err != nil || len(sent) != 0 {
 		t.Errorf("err = %v, sent %v", err, sent)
+	}
+}
+
+// An answer that spans several lines keeps all of them, and the status after
+// the last line still counts.
+func TestAnswerOnSeveralLinesKeepsItsStatus(t *testing.T) {
+	sh := &fake.Shell{Respond: func([]string) shell.Result {
+		return shell.Result{Stdout: "{\n  \"ServerName\": \"Selfnook\"\n}\n200\n"}
+	}}
+	var config map[string]any
+	if err := (api{e: signInEnv(sh)}).call("GET", "/System/Configuration", nil, &config); err != nil || config["ServerName"] != "Selfnook" {
+		t.Errorf("config = %v, err = %v", config, err)
 	}
 }

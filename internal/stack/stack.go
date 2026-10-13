@@ -388,9 +388,9 @@ func (ses *session) waitForGateway() error {
 	}
 }
 
-// signInChecks is how many times waitForSignIn checks, 2 seconds apart:
-// five minutes.
-const signInChecks = 150
+// signInWait is how long waitForSignIn waits. Each check can itself take
+// seconds, so the wait counts time, not checks.
+const signInWait = 5 * time.Minute
 
 // waitForSignIn waits until the admin sign-in page works, so the links the
 // setup guides print do not open a page that is still starting.
@@ -399,7 +399,8 @@ func (ses *session) waitForSignIn() error {
 		return nil
 	}
 	signIn := role.Get(ses.core(), role.AdminSignIn)
-	for check := range signInChecks {
+	deadline := time.Now().Add(signInWait)
+	for check := 0; time.Now().Before(deadline); check++ {
 		ready, err := signIn.Ready(ses.runtime)
 		if err != nil || ready {
 			return err
@@ -573,7 +574,7 @@ func (ses *session) startServices() error {
 			return err
 		}
 	}
-	if err := ses.startWhileVPNServicesStopped(active, keptNames, front); err != nil {
+	if err := ses.startWhileVPNServicesStopped(active, keptNames, behindVPN, front); err != nil {
 		return &StoppedError{Services: behindVPN, Err: err}
 	}
 	if len(behindVPN) > 0 {
@@ -611,7 +612,7 @@ func (ses *session) up(services, kept []string, removeOrphans bool) error {
 	return ses.runtime.Start(byName...)
 }
 
-func (ses *session) startWhileVPNServicesStopped(active, kept []string, started []*app.App) error {
+func (ses *session) startWhileVPNServicesStopped(active, kept, behindVPN []string, started []*app.App) error {
 	var restart []string
 	for _, a := range ses.active() {
 		impl := ses.impl(a)
@@ -628,6 +629,11 @@ func (ses *session) startWhileVPNServicesStopped(active, kept []string, started 
 		return err
 	}
 	for _, service := range restart {
+		// A service behind the VPN starts after the gateway is ready, with
+		// the changes its Prepare hook made.
+		if slices.Contains(behindVPN, service) {
+			continue
+		}
 		if err := ses.runtime.Restart(service); err != nil {
 			return err
 		}
@@ -762,12 +768,18 @@ func (s *Stack) Check() error {
 		}
 		services := a.Services(app.ValuesFor(ses.saved, a))
 		running, err := ses.allRunning(services)
-		if err != nil || !running {
+		if err != nil {
 			return err
 		}
+		if !running {
+			continue
+		}
 		problem, err := impl.Probe(ses.env(a))
-		if err != nil || problem == "" {
+		if err != nil {
 			return err
+		}
+		if problem == "" {
+			continue
 		}
 		s.UI.Say(problem + " Restarting " + a.Title + ".")
 		if err := ses.runtime.Stop(services...); err != nil {

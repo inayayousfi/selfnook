@@ -41,7 +41,7 @@ func dockerHost(subnet string) func([]string) shell.Result {
 			return shell.Result{Stdout: "running\n"}
 		case strings.HasPrefix(line, "docker inspect selfnook-gluetun"):
 			return shell.Result{Stdout: "healthy\n"}
-		case strings.HasPrefix(line, "docker exec selfnook-jellyfin-app curl -sS "):
+		case strings.HasPrefix(line, "docker exec -i selfnook-jellyfin-app curl -sS "):
 			return jellyfinAnswer(args)
 		case strings.HasPrefix(line, "docker exec selfnook-gluetun"):
 			return shell.Result{Stdout: `[{"vpn":"openvpn","country":"Spain"},{"vpn":"wireguard","country":"Chile"}]`}
@@ -723,7 +723,7 @@ func TestSignInTextListsTheRegistryApps(t *testing.T) {
 	if err := s.Setup(); err != nil {
 		t.Fatal(err)
 	}
-	want := "They protect qBittorrent, Sonarr, Radarr, Prowlarr, and VPN country page, which no longer ask for their own logins. Jellyfin and Seerr keep their own logins."
+	want := "They protect qBittorrent, Sonarr, Radarr, Prowlarr, and the VPN country page, which no longer ask for their own logins. Jellyfin and Seerr keep their own logins."
 	if !strings.Contains(ui.Text(), want) {
 		t.Errorf("sign-in text missing; guides:\n%s", ui.Text())
 	}
@@ -899,11 +899,11 @@ func TestSetupConfiguresJellyfinWithoutQuestions(t *testing.T) {
 	}
 	values := readValues(t, s)
 	var requests []string
-	for _, command := range sh.Commands {
-		if len(command) > 3 && command[2] == "selfnook-jellyfin-app" && command[3] == "curl" {
+	for i, command := range sh.Commands {
+		if len(command) > 4 && command[3] == "selfnook-jellyfin-app" && command[4] == "curl" {
 			body := ""
-			if i := slices.Index(command, "--data-binary"); i > 0 {
-				body = " " + command[i+1]
+			if data := fake.CurlBody(sh.Inputs[i]); data != "" {
+				body = " " + data
 			}
 			address := command[len(command)-1]
 			requests = append(requests, command[slices.Index(command, "-X")+1]+" "+address[strings.Index(address, "/jellyfin")+len("/jellyfin"):]+body)

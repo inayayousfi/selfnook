@@ -143,31 +143,34 @@ func (s signIn) Issuer(client string) string {
 // path its built-in proxy answers on for each.
 var checks = map[string]string{"Caddy": outpostPath + "/auth/caddy"}
 
-// readyScript asks Authentik's sign-in check about a page of the address
-// given as its first argument, with its scheme as the second. It exits 0
-// only for a redirect to the sign-in address given as the third argument.
-// Authentik answers "Server is starting up" during its first minutes, then
-// 404 until it has applied the blueprint's proxy provider for the address.
+// readyScript asks the sign-in check at the address given as its first
+// argument about a page of the address given as its second, with its scheme
+// as the third. It exits 0 only for a redirect to the sign-in address given
+// as the fourth argument. Authentik answers "Server is starting up" during
+// its first minutes, then 404 until it has applied the blueprint's proxy
+// provider for the address.
 const readyScript = `import sys, urllib.request as request
 class Keep(request.HTTPRedirectHandler):
     def redirect_request(self, *args): return None
-check = request.Request("http://localhost:9000` + outpostPath + `/auth/caddy",
-    headers={"X-Forwarded-Host": sys.argv[1], "X-Forwarded-Proto": sys.argv[2], "X-Forwarded-Uri": "/"})
+check = request.Request(sys.argv[1],
+    headers={"X-Forwarded-Host": sys.argv[2], "X-Forwarded-Proto": sys.argv[3], "X-Forwarded-Uri": "/"})
 try:
     request.build_opener(Keep).open(check, timeout=10)
 except request.HTTPError as answer:
-    sys.exit(0 if answer.code == 302 and answer.headers.get("Location", "").startswith(sys.argv[3]) else 1)
+    sys.exit(0 if answer.code == 302 and answer.headers.get("Location", "").startswith(sys.argv[4]) else 1)
 sys.exit(1)
 `
 
 // Ready reports whether Authentik sends a visitor of the address to its
-// sign-in page, which the image's own Python asks from inside the server.
+// sign-in page, which the image's own Python asks from inside the server
+// through the same check the address's proxy uses.
 func (s signIn) Ready(r runtime.Runtime) (bool, error) {
-	scheme := "http"
-	if s.access.Secure() {
-		scheme = "https"
+	check, err := s.Check(s.access.Name())
+	if err != nil {
+		return false, err
 	}
-	result, err := r.Exec(serverService, "python3", "-c", readyScript, s.access.Host(), scheme, s.URL()+"/application/o/authorize/")
+	scheme, _, _ := strings.Cut(s.access.URL(), "://")
+	result, err := r.Exec(serverService, "python3", "-c", readyScript, "http://"+check.Upstream+check.Path, s.access.Host(), scheme, s.URL()+"/application/o/authorize/")
 	return err == nil && result.Code == 0, err
 }
 

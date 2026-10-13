@@ -31,7 +31,6 @@ var App = &app.App{
 		{Key: exitNode, Required: true},
 	},
 	Options: []flow.Option{{Value: "tailscale", Label: "Tailscale exit node"}},
-	Choose:  func(app.Values, string) {},
 	WasActive: func(old map[string]string) bool {
 		return old["VPN_GATEWAY_SERVICE"] == service
 	},

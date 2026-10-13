@@ -9,14 +9,18 @@ import (
 	"github.com/inayayousfi/selfnook/internal/shell"
 )
 
-// servedPorts are the ports Caddy serves: 80, 443 unless the pages use
-// plain HTTP, and the own port of each route.
-func servedPorts(v app.Values, routes []app.Route) []int {
-	ports := []int{80}
+// servedPorts are the ports Caddy serves and publishes: 80, 443 unless the
+// pages use plain HTTP, and the own port of each route. compose.yaml
+// publishes the same ports.
+func servedPorts(v app.Values, routes []app.Route) []string {
+	ports := []string{"80"}
 	if v.Get(modeKey) != Local {
-		ports = append(ports, 443)
+		ports = append(ports, "443")
 	}
-	return append(ports, app.OwnPorts(routes)...)
+	for _, port := range app.OwnPorts(routes) {
+		ports = append(ports, strconv.Itoa(port))
+	}
+	return ports
 }
 
 // probe sends plain HTTP to each served port on this computer. Caddy answers
@@ -28,13 +32,13 @@ func probe(e *app.Env) (string, error) {
 	for _, port := range servedPorts(e.Values, e.Routes) {
 		result, err := e.Shell.Run(shell.Cmd{Args: []string{
 			"curl", "--silent", "--output", os.DevNull, "--write-out", "%{http_code}", "--max-time", "10",
-			"http://127.0.0.1:" + strconv.Itoa(port) + "/",
+			"http://127.0.0.1:" + port + "/",
 		}, Capture: true})
 		if err != nil {
 			return "", err
 		}
 		if code := strings.TrimSpace(result.Stdout); code == "" || code == "000" {
-			silent = append(silent, strconv.Itoa(port))
+			silent = append(silent, port)
 		}
 	}
 	if len(silent) == 0 {

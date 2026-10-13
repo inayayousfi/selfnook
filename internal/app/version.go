@@ -109,11 +109,7 @@ func Detect(image Image, found runtime.Image, ask func() (string, error)) state.
 // the container, with the given request headers, and reads the field named
 // field from the JSON answer.
 func AskVersion(e *Env, service, url, field string, headers ...string) (string, error) {
-	args := []string{"curl", "-fsS"}
-	for _, header := range headers {
-		args = append(args, "-H", header)
-	}
-	result, err := e.Runtime.Exec(service, append(args, url)...)
+	result, err := e.Runtime.ExecInput(service, CurlInput(headers, ""), "curl", "-fsS", "--config", "-", url)
 	if err != nil {
 		return "", err
 	}

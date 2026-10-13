@@ -41,6 +41,9 @@ type Runtime interface {
 	RunOnce(service string, args ...string) error
 	// Exec runs a command inside a running service and collects its output.
 	Exec(service string, args ...string) (shell.Result, error)
+	// ExecInput is Exec with input on the command's standard input, for
+	// secrets that must stay out of the command's arguments.
+	ExecInput(service, input string, args ...string) (shell.Result, error)
 	// Health is the health check state of a service, such as "healthy".
 	Health(service string) (string, error)
 	// State is the state of a service's container, such as "running" or
@@ -272,6 +275,10 @@ func (d *docker) RunOnce(service string, args ...string) error {
 
 func (d *docker) Exec(service string, args ...string) (shell.Result, error) {
 	return d.capture(append([]string{"docker", "exec", Container(service)}, args...)...)
+}
+
+func (d *docker) ExecInput(service, input string, args ...string) (shell.Result, error) {
+	return d.shell.Run(shell.Cmd{Args: append([]string{"docker", "exec", "-i", Container(service)}, args...), Capture: true, Stdin: input})
 }
 
 func (d *docker) Health(service string) (string, error) {

@@ -121,7 +121,8 @@ func waitForAPI(e *app.Env, library role.Library) error {
 	endpoint := library.Endpoint()
 	url := "http://localhost:" + strconv.Itoa(endpoint.Port) + library.StatusPath()
 	for range apiChecks {
-		result, err := e.Runtime.Exec(endpoint.Service, "curl", "-fsS", "-o", "/dev/null", "-H", "X-Api-Key: "+library.APIKey(), url)
+		input := app.CurlInput([]string{"X-Api-Key: " + library.APIKey()}, "")
+		result, err := e.Runtime.ExecInput(endpoint.Service, input, "curl", "-fsS", "-o", "/dev/null", "--config", "-", url)
 		if err != nil {
 			return err
 		}

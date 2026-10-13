@@ -44,11 +44,7 @@ func caddyfile(t *testing.T, mode, host, gateway string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, err := caddy.Caddyfile(app.ValuesFor(ses.saved, caddy.App), ses.contributions().Routes, check)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return file
+	return caddy.Caddyfile(app.ValuesFor(ses.saved, caddy.App), ses.contributions().Routes, check)
 }
 
 // guarded reports whether the block that forwards to upstream checks the sign-in first.
@@ -90,20 +86,51 @@ func TestSeerrAndSignInHaveTheirOwnPorts(t *testing.T) {
 }
 
 // The ports Caddy publishes come from the apps that serve their own port,
-// so Seerr and the sign-in pages are reachable from outside.
+// so Seerr and the sign-in pages are reachable from outside. Port 443 is
+// published only when the pages use HTTPS, so an unused port cannot stop
+// Caddy from starting.
 func TestCaddyPublishesThePortsOfItsRoutes(t *testing.T) {
+	for mode, https := range map[string]bool{"domain": true, "local": false} {
+		ses := assembled(t, mode, "media.example.com", "gluetun")
+		if err := ses.writeCompose(); err != nil {
+			t.Fatal(err)
+		}
+		content, err := os.ReadFile(filepath.Join(ses.Root, "compose", "caddy", "compose.yaml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, port := range []string{`"80:80/tcp"`, `"5055:5055/tcp"`, `"9091:9091/tcp"`} {
+			if !strings.Contains(string(content), port) {
+				t.Errorf("%s: Caddy does not publish %s:\n%s", mode, port, content)
+			}
+		}
+		if strings.Contains(string(content), `"443:443/tcp"`) != https {
+			t.Errorf("%s: publishing 443 is %v:\n%s", mode, !https, content)
+		}
+	}
+}
+
+// Files an earlier run wrote for an app no longer active, or that a newer
+// program no longer writes, are removed with their folders, so Compose and
+// the user see only the current files.
+func TestWritingComposeFilesRemovesOldOnes(t *testing.T) {
 	ses := assembled(t, "domain", "media.example.com", "gluetun")
+	old := []string{filepath.Join("retired", "compose.yaml"), filepath.Join("retired", "build", "Dockerfile"), filepath.Join("caddy", "old.yaml")}
+	for _, name := range old {
+		path := filepath.Join(ses.Root, "compose", name)
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		os.WriteFile(path, nil, 0o644)
+	}
 	if err := ses.writeCompose(); err != nil {
 		t.Fatal(err)
 	}
-	content, err := os.ReadFile(filepath.Join(ses.Root, "compose", "caddy", "compose.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, port := range []string{`"80:80/tcp"`, `"443:443/tcp"`, `"5055:5055/tcp"`, `"9091:9091/tcp"`} {
-		if !strings.Contains(string(content), port) {
-			t.Errorf("Caddy does not publish %s:\n%s", port, content)
+	for _, name := range append(old, "retired") {
+		if _, err := os.Stat(filepath.Join(ses.Root, "compose", name)); !os.IsNotExist(err) {
+			t.Errorf("%s remains", name)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(ses.Root, "compose", "caddy", "compose.yaml")); err != nil {
+		t.Error(err)
 	}
 }
 
@@ -284,7 +311,7 @@ func TestUnknownRunningVersionWarnsAndUsesTheBuiltInSteps(t *testing.T) {
 			return shell.Result{Stdout: "sha256:local\n"}
 		case strings.HasPrefix(line, "docker image inspect sha256:local "):
 			return shell.Result{Stdout: "lscr.io/linuxserver/radarr@sha256:0000 |6.5.0.1-ls400\n"}
-		case strings.HasPrefix(line, "docker exec selfnook-radarr-app curl -fsS -H X-Api-Key: "):
+		case strings.HasPrefix(line, "docker exec -i selfnook-radarr-app curl -fsS --config - ") && strings.Contains(sh.LastInput(), `header = "X-Api-Key: `):
 			return shell.Result{Stdout: `{"version": "6.5.0.1"}`}
 		}
 		return host(args)

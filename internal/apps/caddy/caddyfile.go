@@ -11,7 +11,7 @@ import (
 // Caddyfile serves every route at the access address. Routes that are not
 // public or the fallback, including those on their own port, pass through
 // the sign-in check first.
-func Caddyfile(v app.Values, routes []app.Route, check role.Check) (string, error) {
+func Caddyfile(v app.Values, routes []app.Route, check role.Check) string {
 	mode := v.Get(modeKey)
 	host := v.Get(hostKey)
 	url := v.Get(urlKey)
@@ -76,7 +76,7 @@ http://:%d {
 	for _, block := range internal {
 		out.WriteString(block)
 	}
-	return out.String(), nil
+	return out.String()
 }
 
 // matchedHandle forwards one path, keeping or removing the path prefix, after

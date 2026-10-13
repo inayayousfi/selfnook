@@ -33,13 +33,10 @@ func TestAccessAddressMustBeAName(t *testing.T) {
 // An app served on its own port is still behind the sign-in unless it is public.
 func TestOwnPortRoutesKeepTheSignIn(t *testing.T) {
 	check := role.Check{Upstream: "authentik-server:9000", Path: "/outpost.goauthentik.io/auth/caddy"}
-	file, err := caddy.Caddyfile(values("domain", "media.example.com"), []app.Route{
+	file := caddy.Caddyfile(values("domain", "media.example.com"), []app.Route{
 		{Upstream: "authentik-server:9000", Public: true, Port: 9091},
 		{Path: "/tool", Upstream: "tool:8000", Port: 8000},
 	}, check)
-	if err != nil {
-		t.Fatal(err)
-	}
 	want := "media.example.com:8000 {\n\thandle {\n\t\tforward_auth authentik-server:9000 {\n\t\t\turi /outpost.goauthentik.io/auth/caddy\n\t\t\ttrusted_proxies private_ranges\n\t\t}\n\t\treverse_proxy tool:8000\n\t}\n}"
 	if !strings.Contains(file, want) {
 		t.Errorf("Caddyfile:\n%s", file)

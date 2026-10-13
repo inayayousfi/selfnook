@@ -51,7 +51,7 @@ type App struct {
 	WasActive func(old map[string]string) bool
 
 	// Compose holds compose.yaml and any build files for this app's
-	// containers. The file is a text/template rendered with ComposeData.
+	// containers. The file is a text/template rendered with FragmentData.
 	// It reads this app's settings, the core settings, and the values
 	// Environment returns.
 	Compose fs.FS
@@ -119,7 +119,9 @@ type Implementation struct {
 	// before its containers start, saving values it changed. It may stop
 	// this app's own containers when a file can change only while they are
 	// stopped. It returns the services that must restart because a file
-	// they read changed.
+	// they read changed. Services behind the VPN stay stopped while every
+	// Prepare hook runs and start after the gateway is ready, so their files
+	// can change without a restart.
 	Prepare func(e *Env) (restart []string, err error)
 
 	// Started runs once the containers that do not use the VPN are up. The
@@ -394,6 +396,13 @@ type ComposeData struct {
 	Tiles   []Tile
 	Clients []Client
 	Shared  []Shared
+}
+
+// FragmentData is passed to an app's Compose fragment template: every active
+// app's contributions and the app's own saved values.
+type FragmentData struct {
+	ComposeData
+	Values Values
 }
 
 // OwnPorts are the ports that routes are served on besides the main address,

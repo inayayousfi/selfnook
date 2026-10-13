@@ -91,7 +91,7 @@ var App = &app.App{
 		},
 		Status: Status,
 		Routes: func(app.Values, role.Set) []app.Route {
-			return []app.Route{{Name: "VPN country page", Path: "/vpn-country", Upstream: "vpn-country:8090", StripPrefix: true}}
+			return []app.Route{{Name: "the VPN country page", Path: "/vpn-country", Upstream: "vpn-country:8090", StripPrefix: true}}
 		},
 		Tiles: func(v app.Values, _ role.Set) []app.Tile {
 			return []app.Tile{{Group: "Admin", Position: 5, Name: "Gluetun", Description: "VPN connection", Link: "/vpn-country/", Service: "gluetun", Status: &app.Status{URL: "http://gluetun:8000", Key: v.Get(readKey)}}}
@@ -146,15 +146,6 @@ func (gateway) Problem(r runtime.Runtime) string {
 func validate(v app.Values) error {
 	if v.Get("VPN_TYPE") != "openvpn" {
 		return errors.New("The guided Gluetun providers currently use OpenVPN only.")
-	}
-	var missing []string
-	for _, key := range []string{providerKey, userKey, passwordKey} {
-		if !v.Has(key) {
-			missing = append(missing, key)
-		}
-	}
-	if len(missing) > 0 {
-		return errors.New("Missing required VPN values: " + strings.Join(missing, ", "))
 	}
 	return nil
 }
