@@ -4,9 +4,11 @@ services:
     container_name: selfnook-homepage
     restart: unless-stopped
     environment:
-      HOMEPAGE_ALLOWED_HOSTS: "${ADMIN_ACCESS_HOST}"
-      HOMEPAGE_VAR_URL: "${ACCESS_URL}"
-      HOMEPAGE_VAR_GLUETUN_API_KEY: "${GLUETUN_API_KEY:-}"
+      HOMEPAGE_ALLOWED_HOSTS: "${HOMEPAGE_HOST}"
+      HOMEPAGE_VAR_URL: "${HOMEPAGE_URL}"
+{{- range .Tiles}}{{if .Status}}
+      HOMEPAGE_VAR_{{.KeyName}}: "${HOMEPAGE_VAR_{{.KeyName}}}"
+{{- end}}{{end}}
       PUID: "${PUID}"
       PGID: "${PGID}"
     volumes:

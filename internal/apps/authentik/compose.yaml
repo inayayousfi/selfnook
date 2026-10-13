@@ -32,8 +32,6 @@ services:
       AUTHENTIK_POSTGRESQL__PASSWORD: "${AUTHENTIK_DB_PASSWORD}"
       AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
       AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
-      ADMIN_USER: "${ADMIN_USER}"
-      ADMIN_PASS: "${ADMIN_PASS}"
       TZ: "${TZ}"
     volumes:
       - "${CONFIG_DIR}/authentik/data:/data"
@@ -48,7 +46,14 @@ services:
     user: "${PUID}:${PGID}"
     restart: unless-stopped
     shm_size: 512mb
-    environment: *authentik-environment
+    # The worker applies the blueprint, which reads the admin login.
+    environment:
+      <<: *authentik-environment
+      ADMIN_USER: "${ADMIN_USER}"
+      ADMIN_PASS: "${ADMIN_PASS}"
+{{- range .Clients}}
+      {{.SecretKey}}: "{{.SecretRef}}"
+{{- end}}
     volumes:
       - "${CONFIG_DIR}/authentik/data:/data"
       - "${CONFIG_DIR}/authentik/blueprints:/blueprints/custom:ro"

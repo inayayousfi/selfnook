@@ -8,55 +8,79 @@ import (
 	"strings"
 
 	"github.com/inayayousfi/selfnook/internal/app"
-	"github.com/inayayousfi/selfnook/internal/apps/authentik"
-	"github.com/inayayousfi/selfnook/internal/apps/caddy"
-	"github.com/inayayousfi/selfnook/internal/apps/vpn"
 	"github.com/inayayousfi/selfnook/internal/files"
 	"github.com/inayayousfi/selfnook/internal/flow"
+	"github.com/inayayousfi/selfnook/internal/role"
+	"github.com/inayayousfi/selfnook/internal/runtime"
 )
 
 //go:embed compose.yaml
 var compose embed.FS
 
-const noticeKey = "QBT_LEGAL_NOTICE"
+const (
+	noticeKey = "QBT_LEGAL_NOTICE"
+	host      = "qbittorrent"
+	port      = 8080
+)
 
 var App = &app.App{
-	Name:       "qbittorrent",
-	Settings:   []app.Setting{{Key: noticeKey, Example: "confirm", Required: true}},
-	Compose:    compose,
+	Name:     "qbittorrent",
+	Title:    "qBittorrent",
+	Settings: []app.Setting{{Key: noticeKey, Required: true}},
+	Needs:    []role.Role{role.AccessAddress, role.AdminSignIn, role.VPN},
+	Compose:  compose,
+	Environment: func(r role.Set, _ app.ComposeData) map[string]string {
+		return map[string]string{"QBITTORRENT_NETWORK": "service:" + role.Get(r, role.VPN).Service()}
+	},
 	Services:   func(app.Values) []string { return []string{"qbittorrent"} },
 	BehindVPN:  []string{"qbittorrent"},
 	ConfigDirs: []string{"qbittorrent"},
 	MediaDirs:  []string{"Downloads"},
 	Validate: func(v app.Values) error {
 		if v.Get(noticeKey) != "confirm" {
-			return errors.New("qBittorrent's legal notice is not confirmed in .env.")
+			return errors.New("qBittorrent's legal notice is not confirmed in the saved settings.")
 		}
 		return nil
 	},
 	Configure: configure,
-	Prepare: func(e *app.Env) ([]string, error) {
-		_, err := WriteLoginBypass(e.ConfigPath(configFile...))
-		return nil, err
-	},
-	Setup: setup,
-	Routes: func(v app.Values) []app.Route {
-		return []app.Route{{
-			Name:        "qBittorrent",
-			Path:        "/qbittorrent",
-			Upstream:    vpn.Gateway(v) + ":8080",
-			StripPrefix: true,
-		}}
-	},
-	Tiles: func(app.Values) []app.Tile {
-		return []app.Tile{{Group: "Admin", Position: 1, YAML: `    - qBittorrent:
-        icon: qbittorrent.png
-        server: selfnook
-        container: selfnook-qbittorrent
-        href: "{{HOMEPAGE_VAR_URL}}/qbittorrent/"
-        description: Manage downloads
-`}}
-	},
+	Images: []app.Image{{
+		Service: "qbittorrent",
+		Digests: map[string]string{"sha256:9ebb534fe30bab98622cb84a8c3acecfd88319b2d540f52ecdec7b9f866374d7": "5.2.3"},
+		Labels:  map[string]string{"5.2.3-1": "5.2.3"},
+	}},
+	Implementations: []app.Implementation{{
+		From: "5.2.3", Until: "5.2.3",
+		Provides: []role.Offer{role.Provide(role.Downloads, func(role.Values, role.Set) role.DownloadClient { return client{} })},
+		Prepare: func(e *app.Env) ([]string, error) {
+			_, err := WriteLoginBypass(e.ConfigPath(configFile...))
+			return nil, err
+		},
+		Setup: setup,
+		Routes: func(_ app.Values, r role.Set) []app.Route {
+			return []app.Route{{
+				Name:        "qBittorrent",
+				Path:        "/qbittorrent",
+				Upstream:    role.Get(r, role.VPN).Service() + ":8080",
+				StripPrefix: true,
+			}}
+		},
+		Tiles: func(app.Values, role.Set) []app.Tile {
+			return []app.Tile{{Group: "Admin", Position: 1, Name: "qBittorrent", Description: "Manage downloads", Link: "/qbittorrent/", Service: "qbittorrent"}}
+		},
+		Shared: &app.Shared{Alias: host, Ports: []string{"8080", "6881"}, Published: []string{"6881:6881/tcp", "6881:6881/udp"}},
+	}},
+}
+
+// client is the download client role.
+type client struct{}
+
+func (client) Name() string { return "qBittorrent" }
+
+// Login is empty: Prepare lets the stack network in without a login.
+func (client) Login() (string, string) { return "", "" }
+
+func (client) Endpoint() role.Endpoint {
+	return role.Endpoint{Service: "qbittorrent", Host: host, Port: port}
 }
 
 func configure(e *app.Env) error {
@@ -81,7 +105,8 @@ func configure(e *app.Env) error {
 
 func setup(e *app.Env) error {
 	return e.Step("qbittorrent", false, func() error {
-		return flow.Show(e.UI, Guide(caddy.URL(e.Values), authentik.User(e.Values), authentik.Password(e.Values)))
+		signIn := role.Get(e.Roles, role.AdminSignIn)
+		return flow.Show(e.UI, Guide(role.Get(e.Roles, role.AccessAddress).URL(), signIn.User(), signIn.Password()))
 	})
 }
 
@@ -110,7 +135,7 @@ var configFile = []string{"qbittorrent", "qBittorrent", "config", "qBittorrent.c
 func WriteLoginBypass(path string) (bool, error) {
 	wanted := [][2]string{
 		{`WebUI\AuthSubnetWhitelistEnabled`, "true"},
-		{`WebUI\AuthSubnetWhitelist`, app.NetworkSubnet},
+		{`WebUI\AuthSubnetWhitelist`, runtime.NetworkSubnet},
 	}
 	originalBytes, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -147,11 +172,7 @@ func WriteLoginBypass(path string) (bool, error) {
 		section = append(section, setting[0]+"="+setting[1])
 	}
 	result := append(append(append([]string{}, lines[:start]...), section...), lines[end:]...)
-	content := strings.Join(result, "\n") + "\n"
-	if content == original {
-		return false, nil
-	}
-	return files.WriteIfChanged(path, []byte(content))
+	return files.WriteIfChanged(path, []byte(strings.Join(result, "\n")+"\n"))
 }
 
 // splitLines splits like Python's str.splitlines for "\n" and "\r\n" endings.

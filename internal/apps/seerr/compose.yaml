@@ -10,6 +10,6 @@ services:
     volumes:
       - "${CONFIG_DIR}/seerr:/app/config"
     depends_on:
-      - jellyfin-app
-      - sonarr-app
-      - radarr-app
+      - "${SEERR_MEDIA_SERVER}"
+      - "${SEERR_SERIES}"
+      - "${SEERR_MOVIES}"

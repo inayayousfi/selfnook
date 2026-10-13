@@ -6,22 +6,13 @@ import (
 	"testing"
 
 	"github.com/inayayousfi/selfnook/internal/fake"
-	"github.com/inayayousfi/selfnook/internal/settings"
 )
 
-func credentialStack(t *testing.T, values map[string]string, answers map[string]string) (*Stack, *fake.UI) {
+func credentialStack(t *testing.T, gateway string, values map[string]string, answers map[string]string) (*Stack, *fake.UI) {
 	t.Helper()
 	ui := &fake.UI{Answers: answers}
 	s := newTestStack(t, ui, &fake.Shell{})
-	saved := settings.NewValues()
-	for _, key := range []string{"ADMIN_USER", "ADMIN_PASS", "SONARR_API_KEY", "VPN_GATEWAY_SERVICE", "VPN_SERVICE_PROVIDER", "VPN_OPENVPN_USER", "VPN_OPENVPN_PASSWORD", "TAILSCALE_EXIT_NODE", "TAILSCALE_AUTH_KEY"} {
-		if value, ok := values[key]; ok {
-			saved.Set(key, value)
-		}
-	}
-	if err := settings.Write(s.envFile(), saved); err != nil {
-		t.Fatal(err)
-	}
+	writeState(t, s, values, map[string]string{"gateway": gateway})
 	return s, ui
 }
 
@@ -31,14 +22,14 @@ func TestNoGroupListsGroupsWithoutReadingValues(t *testing.T) {
 	if err := s.Credentials(""); err != nil {
 		t.Fatal(err)
 	}
-	want := "say: Choose a group: sonarr, radarr, vpn, access, admin, jellyfin\nPasswords and API keys appear only when you choose a group."
+	want := "say: Choose a group: folders, sonarr, radarr, vpn, access, admin, jellyfin\nPasswords and API keys appear only when you choose a group."
 	if !slices.Equal(ui.Events, []string{want}) {
 		t.Errorf("events = %q", ui.Events)
 	}
 }
 
 func TestListingShowsEachValueAndNoKeepsEverything(t *testing.T) {
-	s, ui := credentialStack(t, map[string]string{"ADMIN_USER": "admin", "ADMIN_PASS": "secret"}, map[string]string{"change": "no"})
+	s, ui := credentialStack(t, "gluetun", map[string]string{"ADMIN_USER": "admin", "ADMIN_PASS": "secret"}, map[string]string{"change": "no"})
 	if err := s.Credentials("admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +42,7 @@ func TestListingShowsEachValueAndNoKeepsEverything(t *testing.T) {
 }
 
 func TestEnterEverywhereChangesNothing(t *testing.T) {
-	s, ui := credentialStack(t, map[string]string{"ADMIN_USER": "admin", "ADMIN_PASS": "secret"},
+	s, ui := credentialStack(t, "gluetun", map[string]string{"ADMIN_USER": "admin", "ADMIN_PASS": "secret"},
 		map[string]string{"change": "yes", "ADMIN_USER": "", "ADMIN_PASS": ""})
 	if err := s.Credentials("admin"); err != nil {
 		t.Fatal(err)
@@ -63,12 +54,12 @@ func TestEnterEverywhereChangesNothing(t *testing.T) {
 
 func TestChangedAPIKeyIsValidatedSavedAndAppliesAtNextStart(t *testing.T) {
 	newKey := strings.Repeat("A", 32)
-	s, ui := credentialStack(t, map[string]string{"SONARR_API_KEY": strings.Repeat("0", 32)},
+	s, ui := credentialStack(t, "gluetun", map[string]string{"SONARR_API_KEY": strings.Repeat("0", 32)},
 		map[string]string{"change": "yes", "SONARR_API_KEY": newKey})
 	if err := s.Credentials("sonarr"); err != nil {
 		t.Fatal(err)
 	}
-	if got := readEnv(t, s).Get("SONARR_API_KEY"); got != strings.ToLower(newKey) {
+	if got := readValues(t, s)["SONARR_API_KEY"]; got != strings.ToLower(newKey) {
 		t.Errorf("saved key = %q", got)
 	}
 	tail := ui.Events[len(ui.Events)-2:]
@@ -82,7 +73,7 @@ func TestChangedAPIKeyIsValidatedSavedAndAppliesAtNextStart(t *testing.T) {
 }
 
 func TestChangedPasswordIsAskedTwice(t *testing.T) {
-	s, ui := credentialStack(t, map[string]string{"ADMIN_USER": "admin", "ADMIN_PASS": "secret"},
+	s, ui := credentialStack(t, "gluetun", map[string]string{"ADMIN_USER": "admin", "ADMIN_PASS": "secret"},
 		map[string]string{"change": "yes", "ADMIN_USER": "", "ADMIN_PASS": "new-secret"})
 	if err := s.Credentials("admin"); err != nil {
 		t.Fatal(err)
@@ -91,20 +82,37 @@ func TestChangedPasswordIsAskedTwice(t *testing.T) {
 	if password.Repeat != "Repeat new password" || password.Mismatch != "Values do not match." {
 		t.Errorf("password field = %+v", password)
 	}
-	if readEnv(t, s).Get("ADMIN_PASS") != "new-secret" {
+	if readValues(t, s)["ADMIN_PASS"] != "new-secret" {
 		t.Error("password not saved")
 	}
 }
 
+// A value the application keeps itself changes only Selfnook's record, so
+// the user is told to change it in the application too.
+func TestChangedRecordNamesTheApplicationToChange(t *testing.T) {
+	s, ui := credentialStack(t, "gluetun", map[string]string{"JELLYFIN_ADMIN_USER": "jelly", "JELLYFIN_ADMIN_PASS": "secret"},
+		map[string]string{"change": "yes", "JELLYFIN_ADMIN_USER": "", "JELLYFIN_ADMIN_PASS": "new-secret"})
+	if err := s.Credentials("jellyfin"); err != nil {
+		t.Fatal(err)
+	}
+	if readValues(t, s)["JELLYFIN_ADMIN_PASS"] != "new-secret" {
+		t.Error("password not saved")
+	}
+	want := "say: Selfnook keeps only a record of Administrator password. Change it in Jellyfin as well."
+	if !slices.Contains(ui.Events, want) {
+		t.Errorf("events = %q", ui.Events)
+	}
+}
+
 func TestVPNShowsFixedSettingsWithoutAskingForThem(t *testing.T) {
-	s, ui := credentialStack(t, map[string]string{
-		"VPN_GATEWAY_SERVICE": "gluetun", "VPN_SERVICE_PROVIDER": "nordvpn",
-		"VPN_OPENVPN_USER": "u", "VPN_OPENVPN_PASSWORD": "p", "TAILSCALE_EXIT_NODE": "stale",
+	s, ui := credentialStack(t, "gluetun", map[string]string{
+		"VPN_SERVICE_PROVIDER": "nordvpn",
+		"VPN_OPENVPN_USER":     "u", "VPN_OPENVPN_PASSWORD": "p", "TAILSCALE_EXIT_NODE": "stale",
 	}, map[string]string{"change": "yes", "VPN_OPENVPN_USER": "", "VPN_OPENVPN_PASSWORD": ""})
 	if err := s.Credentials("vpn"); err != nil {
 		t.Fatal(err)
 	}
-	if ui.Screens[0].Body != "Provider: nordvpn\nGateway: gluetun\nService username: u\nService password: p" {
+	if ui.Screens[0].Body != "Provider: nordvpn\nService username: u\nService password: p" {
 		t.Errorf("listing = %q", ui.Screens[0].Body)
 	}
 	var keys []string
@@ -117,20 +125,20 @@ func TestVPNShowsFixedSettingsWithoutAskingForThem(t *testing.T) {
 }
 
 func TestTailscaleVPNShowsOnlyTailscaleValues(t *testing.T) {
-	s, ui := credentialStack(t, map[string]string{
-		"VPN_GATEWAY_SERVICE": "tailscale-vpn", "VPN_OPENVPN_USER": "stale",
+	s, ui := credentialStack(t, "tailscale", map[string]string{
+		"VPN_OPENVPN_USER":    "stale",
 		"TAILSCALE_EXIT_NODE": "exit", "TAILSCALE_AUTH_KEY": "tskey",
 	}, map[string]string{"change": "no"})
 	if err := s.Credentials("vpn"); err != nil {
 		t.Fatal(err)
 	}
-	if ui.Screens[0].Body != "Gateway: tailscale-vpn\nExit node: exit\nAuth key: tskey" {
+	if ui.Screens[0].Body != "Exit node: exit\nAuth key: tskey" {
 		t.Errorf("listing = %q", ui.Screens[0].Body)
 	}
 }
 
 func TestUnconfiguredGroupReportsNoSavedValues(t *testing.T) {
-	s, ui := credentialStack(t, map[string]string{}, nil)
+	s, ui := credentialStack(t, "gluetun", map[string]string{}, nil)
 	if err := s.Credentials("jellyfin"); err != nil {
 		t.Fatal(err)
 	}

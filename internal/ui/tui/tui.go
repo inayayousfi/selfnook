@@ -169,8 +169,9 @@ func (m *model) menuKey(msg tea.KeyPressMsg) tea.Cmd {
 		return tea.Quit
 	}
 	chosen := commands.All[m.cursor]
+	m.command = chosen
 	if chosen.Group {
-		m.command, m.view, m.cursor = chosen, groupView, 0
+		m.view, m.cursor = groupView, 0
 		return nil
 	}
 	m.start(chosen.Label, func(s *stack.Stack) error { return chosen.Run(s, nil) })
@@ -180,7 +181,7 @@ func (m *model) menuKey(msg tea.KeyPressMsg) tea.Cmd {
 func (m *model) groupKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	if key == "esc" || key == "q" {
-		m.view, m.cursor = menuView, slices.IndexFunc(commands.All, func(c commands.Command) bool { return c.Name == m.command.Name })
+		m.backToMenu()
 		return nil
 	}
 	m.cursor = moveCursor(key, m.cursor, len(m.groups))
@@ -189,6 +190,11 @@ func (m *model) groupKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.start(chosen.Label+": "+group, func(s *stack.Stack) error { return chosen.Run(s, []string{group}) })
 	}
 	return nil
+}
+
+// backToMenu shows the menu with the cursor on the last chosen command.
+func (m *model) backToMenu() {
+	m.view, m.cursor = menuView, slices.IndexFunc(commands.All, func(c commands.Command) bool { return c.Name == m.command.Name })
 }
 
 // start runs a command in its own goroutine, connected through a bridge.
@@ -209,7 +215,7 @@ func (m *model) runKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
 	if !m.running && m.ask == nil {
 		if key == "enter" || key == "esc" || key == "q" {
-			m.view, m.cursor = menuView, 0
+			m.backToMenu()
 		}
 		return nil
 	}
@@ -342,7 +348,15 @@ func (m *model) answerKey(msg tea.KeyPressMsg) tea.Cmd {
 
 func (m *model) accept(value string) tea.Cmd {
 	a := m.ask
-	a.answers[a.screen.Fields[a.index].Key] = value
+	key := a.screen.Fields[a.index].Key
+	a.answers[key] = value
+	if a.screen.Answered != nil {
+		if err := a.screen.Answered(key, value); err != nil {
+			a.reply <- askReply{err: err}
+			m.ask = nil
+			return nil
+		}
+	}
 	a.index++
 	if a.index < len(a.screen.Fields) {
 		return m.prepareField()

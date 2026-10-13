@@ -7,8 +7,9 @@ services:
     ports:
       - "80:80/tcp"
       - "443:443/tcp"
-      - "5055:5055/tcp"
-      - "9091:9091/tcp"
+{{- range .OwnPorts}}
+      - "{{.}}:{{.}}/tcp"
+{{- end}}
     volumes:
       - "${CONFIG_DIR}/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
       - "${CONFIG_DIR}/caddy/certs:/certs:ro"
@@ -16,7 +17,9 @@ services:
       - "${CONFIG_DIR}/caddy/config:/config"
     networks:
       default:
+        # Containers reach the access address through Caddy, as browsers do.
         aliases:
+          - "${ADMIN_ACCESS_HOST}"
 {{- range .Routes}}{{with .Internal}}
           - {{.Name}}
 {{- end}}{{end}}

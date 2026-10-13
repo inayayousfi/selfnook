@@ -2,7 +2,7 @@
 
 sonarr:
   series:
-    base_url: http://sonarr:8989
+    base_url: {{.Series}}
     api_key: !env_var SONARR_API_KEY
 
     quality_definition:
@@ -10,7 +10,7 @@ sonarr:
 
     quality_profiles:
       - trash_id: c4cadd6b35b95f62c3d47a408e53e2f7 # WEB-2160p (Combined)
-        name: 4K Progressive
+        name: {{.SeriesProfile}}
         reset_unmatched_scores:
           enabled: true
 
@@ -21,7 +21,7 @@ sonarr:
 
 radarr:
   movies:
-    base_url: http://radarr:7878
+    base_url: {{.Movies}}
     api_key: !env_var RADARR_API_KEY
 
     quality_definition:
@@ -29,7 +29,7 @@ radarr:
 
     quality_profiles:
       - trash_id: 64fb5f9858489bdac2af690e27c8f42f # UHD Bluray + WEB
-        name: 4K Progressive
+        name: {{.MoviesProfile}}
         reset_unmatched_scores:
           enabled: true
         upgrade:

@@ -2,18 +2,20 @@ package stack
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/inayayousfi/selfnook/internal/app"
 	"github.com/inayayousfi/selfnook/internal/flow"
-	"github.com/inayayousfi/selfnook/internal/settings"
 )
 
-// CredentialGroups lists the groups' names in registry order.
+// CredentialGroups lists the groups' names: the core's, then the apps' in
+// registry order. Apps that can fill the same role share a group name,
+// listed once.
 func CredentialGroups(apps []*app.App) []string {
 	var names []string
-	for _, a := range apps {
-		if a.Credentials != nil {
+	for _, a := range append([]*app.App{app.Core}, apps...) {
+		if a.Credentials != nil && !slices.Contains(names, a.Credentials.Name) {
 			names = append(names, a.Credentials.Name)
 		}
 	}
@@ -27,24 +29,34 @@ func (s *Stack) Credentials(name string) error {
 		s.UI.Say("Choose a group: " + strings.Join(CredentialGroups(s.Apps), ", ") + "\nPasswords and API keys appear only when you choose a group.")
 		return nil
 	}
+	if !slices.Contains(CredentialGroups(s.Apps), name) {
+		return fmt.Errorf("Unknown group: %s.", name)
+	}
+	ses, found, err := s.open()
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errNoSetup
+	}
+	if err := ses.assignRoles(false); err != nil {
+		return err
+	}
 	var owner *app.App
-	for _, a := range s.Apps {
+	for _, a := range append([]*app.App{app.Core}, ses.active()...) {
 		if a.Credentials != nil && a.Credentials.Name == name {
 			owner = a
 		}
 	}
 	if owner == nil {
-		return fmt.Errorf("Unknown group: %s.", name)
+		s.UI.Say("No saved values for " + name + ".")
+		return nil
 	}
-	saved, err := s.readSaved()
-	if err != nil {
-		return err
-	}
-	group, values := owner.Credentials, app.ValuesFor(saved, owner)
+	group, values := owner.Credentials, app.ValuesFor(ses.saved, owner)
 
 	var shown []app.CredentialField
 	for _, field := range group.Fields {
-		if (group.Visible == nil || group.Visible(values, field)) && values.Has(field.Key) {
+		if values.Has(field.Key) {
 			shown = append(shown, field)
 		}
 	}
@@ -72,7 +84,7 @@ func (s *Stack) Credentials(name string) error {
 	if answers, err = s.UI.Ask(flow.Screen{Fields: fields}); err != nil {
 		return err
 	}
-	return s.saveChanges(saved, values, shown, answers)
+	return ses.saveChanges(owner, values, shown, answers)
 }
 
 func newValueField(field app.CredentialField) flow.Field {
@@ -94,8 +106,9 @@ func newValueField(field app.CredentialField) flow.Field {
 	return result
 }
 
-func (s *Stack) saveChanges(saved *settings.Values, values app.Values, fields []app.CredentialField, answers flow.Answers) error {
+func (ses *session) saveChanges(owner *app.App, values app.Values, fields []app.CredentialField, answers flow.Answers) error {
 	changed, usedByStack := false, false
+	var recorded []string
 	for _, field := range fields {
 		value := answers[field.Key]
 		if value == "" || value == values.Get(field.Key) {
@@ -104,17 +117,27 @@ func (s *Stack) saveChanges(saved *settings.Values, values app.Values, fields []
 		values.Set(field.Key, value)
 		changed = true
 		usedByStack = usedByStack || field.UsedByStack
+		if !field.UsedByStack {
+			recorded = append(recorded, field.Label)
+		}
 	}
 	if !changed {
-		s.UI.Say("No changes.")
+		ses.UI.Say("No changes.")
 		return nil
 	}
-	if err := settings.Write(s.envFile(), saved); err != nil {
+	if err := ses.save(); err != nil {
 		return err
 	}
-	s.UI.Say("Saved.")
+	ses.UI.Say("Saved.")
 	if usedByStack {
-		s.UI.Say("The stack uses the changed values after its next start.")
+		ses.UI.Say("The stack uses the changed values after its next start.")
+	}
+	if len(recorded) > 0 {
+		pronoun := "it"
+		if len(recorded) > 1 {
+			pronoun = "them"
+		}
+		ses.UI.Say("Selfnook keeps only a record of " + app.List(recorded) + ". Change " + pronoun + " in " + owner.Title + " as well.")
 	}
 	return nil
 }

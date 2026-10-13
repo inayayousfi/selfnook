@@ -27,14 +27,6 @@ func Required(message string) func(string) (string, error) {
 	}
 }
 
-// Username rejects names that cannot be stored in a "user:hash" entry.
-func Username(value string) (string, error) {
-	if strings.Contains(value, ":") {
-		return "", errors.New("Username cannot contain ':'.")
-	}
-	return value, nil
-}
-
 // APIKeyField asks for the API key that service generated.
 func APIKeyField(key, service string) Field {
 	return Field{Key: key, Prompt: "Paste the " + service + " API key", Check: ValidAPIKey}
@@ -54,5 +46,5 @@ func PasswordField(key, service string) Field {
 
 // UsernameField asks for a username, defaulting to admin.
 func UsernameField(key, service string) Field {
-	return Field{Key: key, Prompt: service + " username", Default: "admin", Check: Username}
+	return Field{Key: key, Prompt: service + " username", Default: "admin"}
 }

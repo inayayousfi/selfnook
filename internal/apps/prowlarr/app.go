@@ -3,69 +3,102 @@ package prowlarr
 
 import (
 	"embed"
+	"strconv"
 
 	"github.com/inayayousfi/selfnook/internal/app"
-	"github.com/inayayousfi/selfnook/internal/apps/caddy"
-	"github.com/inayayousfi/selfnook/internal/apps/radarr"
-	"github.com/inayayousfi/selfnook/internal/apps/sonarr"
-	"github.com/inayayousfi/selfnook/internal/apps/vpn"
 	"github.com/inayayousfi/selfnook/internal/flow"
+	"github.com/inayayousfi/selfnook/internal/role"
 )
 
 //go:embed compose.yaml
 var compose embed.FS
 
+const (
+	service = "prowlarr"
+	host    = "prowlarr"
+	port    = 9696
+)
+
 var App = &app.App{
-	Name:       "prowlarr",
-	Compose:    compose,
-	Services:   func(app.Values) []string { return []string{"prowlarr"} },
-	BehindVPN:  []string{"prowlarr"},
+	Name:    "prowlarr",
+	Title:   "Prowlarr",
+	Needs:   []role.Role{role.AccessAddress, role.Series, role.Movies, role.VPN},
+	Compose: compose,
+	Environment: func(r role.Set, _ app.ComposeData) map[string]string {
+		return map[string]string{"PROWLARR_NETWORK": "service:" + role.Get(r, role.VPN).Service()}
+	},
+	Services:   func(app.Values) []string { return []string{service} },
+	BehindVPN:  []string{service},
 	ConfigDirs: []string{"prowlarr"},
-	Setup: func(e *app.Env) error {
-		return e.Step("prowlarr", false, func() error {
-			return flow.Show(e.UI, Guide(caddy.URL(e.Values), sonarr.APIKey(e.Values), radarr.APIKey(e.Values)))
-		})
-	},
-	Routes: func(v app.Values) []app.Route {
-		return []app.Route{{
-			Name:     "Prowlarr",
-			Path:     "/prowlarr",
-			Upstream: vpn.Gateway(v) + ":9696",
-			Internal: &app.Internal{Name: "prowlarr", Port: 9696},
-		}}
-	},
-	Tiles: func(app.Values) []app.Tile {
-		return []app.Tile{{Group: "Admin", Position: 4, YAML: `    - Prowlarr:
-        icon: prowlarr.png
-        server: selfnook
-        container: selfnook-prowlarr
-        href: "{{HOMEPAGE_VAR_URL}}/prowlarr"
-        description: Manage indexers
-`}}
-	},
+	Images: []app.Image{{
+		Service: service,
+		Digests: map[string]string{"sha256:1295cff29d10b486c0d8324d1559a552140a5932bf8b3d87e398654414f63f92": "2.5.2.5491"},
+		Labels:  map[string]string{"2.5.2.5491-ls156": "2.5.2.5491"},
+	}},
+	Implementations: []app.Implementation{{
+		From: "2.5.2.5491", Until: "2.5.2.5491",
+		Provides: []role.Offer{role.Provide(role.Indexers, func(role.Values, role.Set) role.IndexerManager { return indexers{} })},
+		Setup: func(e *app.Env) error {
+			return e.Step("prowlarr", false, func() error {
+				screen, err := Guide(role.Get(e.Roles, role.AccessAddress).URL(), role.Get(e.Roles, role.Series), role.Get(e.Roles, role.Movies))
+				if err != nil {
+					return err
+				}
+				return flow.Show(e.UI, screen)
+			})
+		},
+		Routes: func(_ app.Values, r role.Set) []app.Route {
+			return []app.Route{{
+				Name:     "Prowlarr",
+				Path:     "/prowlarr",
+				Upstream: role.Get(r, role.VPN).Service() + ":" + strconv.Itoa(port),
+				Internal: &app.Internal{Name: host, Port: port},
+			}}
+		},
+		Tiles: func(app.Values, role.Set) []app.Tile {
+			return []app.Tile{{Group: "Admin", Position: 4, Name: "Prowlarr", Description: "Manage indexers", Link: "/prowlarr", Service: "prowlarr"}}
+		},
+		Shared: &app.Shared{Ports: []string{strconv.Itoa(port)}},
+	}},
 }
 
-// Guide connects Prowlarr to Sonarr and Radarr with their saved API keys.
-func Guide(accessURL, sonarrKey, radarrKey string) flow.Screen {
-	return flow.Screen{
-		Title: "Prowlarr setup",
-		Body: `Open this link:
-` + accessURL + `/prowlarr
+// indexers is the indexer manager role. Other containers reach it through
+// Caddy's internal name.
+type indexers struct{}
 
-1. Open Settings > Apps.
-2. Click Add, then select Sonarr.
-3. Set Sync Level to Full Sync.
-4. Prowlarr Server: http://prowlarr:9696
-5. Sonarr Server: http://sonarr:8989
-6. API Key: ` + sonarrKey + `
-7. Click Test, then Save.
-8. Click Add, then select Radarr.
-9. Set Sync Level to Full Sync.
-10. Prowlarr Server: http://prowlarr:9696
-11. Radarr Server: http://radarr:7878
-12. API Key: ` + radarrKey + `
-13. Click Test, then Save.
-14. Open Indexers, add your indexers, then test each one.`,
-		Wait: "Prowlarr",
+func (indexers) Name() string { return "Prowlarr" }
+
+func (indexers) Endpoint() role.Endpoint {
+	return role.Endpoint{Service: service, Host: host, Port: port}
+}
+
+// apps are the libraries Prowlarr can sync indexers to, as its Apps page lists them.
+var apps = map[string]string{"Sonarr": "Sonarr", "Radarr": "Radarr"}
+
+// Guide connects Prowlarr to both libraries with their saved API keys.
+func Guide(accessURL string, libraries ...role.Library) (flow.Screen, error) {
+	body := `Open this link:
+` + accessURL + `/prowlarr
+`
+	step := 1
+	add := func(text string) {
+		body += "\n" + strconv.Itoa(step) + ". " + text
+		step++
 	}
+	add("Open Settings > Apps.")
+	for _, library := range libraries {
+		listed, ok := apps[library.Name()]
+		if !ok {
+			return flow.Screen{}, &role.Unsupported{App: "Prowlarr", Other: library.Name()}
+		}
+		endpoint := library.Endpoint()
+		add("Click Add, then select " + listed + ".")
+		add("Set Sync Level to Full Sync.")
+		add("Prowlarr Server: http://" + host + ":" + strconv.Itoa(port))
+		add(library.Name() + " Server: http://" + endpoint.Host + ":" + strconv.Itoa(endpoint.Port))
+		add("API Key: " + library.APIKey())
+		add("Click Test, then Save.")
+	}
+	add("Open Indexers, add your indexers, then test each one.")
+	return flow.Screen{Title: "Prowlarr setup", Body: body, Wait: "Prowlarr"}, nil
 }

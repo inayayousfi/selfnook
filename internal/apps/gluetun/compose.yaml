@@ -1,0 +1,34 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest@sha256:12df8b20528d4cd5e9b6e827d40f2886cf78e53e7e9afc750050648c31183793
+    container_name: selfnook-gluetun
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: "${VPN_SERVICE_PROVIDER}"
+      VPN_TYPE: "${VPN_TYPE}"
+      OPENVPN_USER: "${VPN_OPENVPN_USER}"
+      OPENVPN_PASSWORD: "${VPN_OPENVPN_PASSWORD}"
+      SERVER_COUNTRIES: "${VPN_SERVER_COUNTRIES}"
+      OPENVPN_PROTOCOL: udp
+      FIREWALL_INPUT_PORTS: "{{range .SharedPorts}}{{.}},{{end}}8000"
+      TZ: "${TZ}"
+{{- template "shared" .}}
+    volumes:
+      - "${CONFIG_DIR}/gluetun:/gluetun"
+
+  vpn-country:
+    build: ./compose/gluetun/countrypage
+    image: selfnook/vpn-country
+    pull_policy: build
+    container_name: selfnook-vpn-country
+    user: "${PUID}:${PGID}"
+    restart: unless-stopped
+    environment:
+      GLUETUN_CONTROL_KEY: "${GLUETUN_CONTROL_KEY}"
+      TZ: "${TZ}"
+    volumes:
+      - "${CONFIG_DIR}/vpn-country:/data"

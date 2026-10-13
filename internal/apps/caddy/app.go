@@ -7,11 +7,13 @@ import (
 	"errors"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/inayayousfi/selfnook/internal/app"
 	"github.com/inayayousfi/selfnook/internal/files"
 	"github.com/inayayousfi/selfnook/internal/flow"
+	"github.com/inayayousfi/selfnook/internal/role"
 )
 
 //go:embed compose.yaml
@@ -22,18 +24,23 @@ const (
 	hostKey = "ADMIN_ACCESS_HOST"
 	urlKey  = "ACCESS_URL"
 
+	// name is how this proxy asks the sign-in service for its check address.
+	name = "Caddy"
+
 	Tailscale = "tailscale"
 	Domain    = "domain"
 	Local     = "local"
 )
 
 var App = &app.App{
-	Name: "caddy",
+	Name:  "caddy",
+	Title: "Caddy",
 	Settings: []app.Setting{
-		{Key: modeKey, Example: Tailscale, Required: true},
-		{Key: hostKey, Example: "media-host.example.ts.net", Required: true},
-		{Key: urlKey, Example: "https://media-host.example.ts.net"},
+		{Key: modeKey, Required: true},
+		{Key: hostKey, Required: true},
+		{Key: urlKey},
 	},
+	Needs:      []role.Role{role.AdminSignIn},
 	Compose:    compose,
 	Services:   func(app.Values) []string { return []string{"caddy"} },
 	ConfigDirs: []string{"caddy/certs", "caddy/data", "caddy/config"},
@@ -44,12 +51,20 @@ var App = &app.App{
 		}
 	},
 	Configure: configure,
-	Prepare:   prepare,
+	Images: []app.Image{{
+		Service: "caddy",
+		Digests: map[string]string{"sha256:3422ce6de165df66534f9b9ba50efaf457114ec961763cc52f5dbdaac2972d73": "2.11.6"},
+		Labels:  map[string]string{"v2.11.6": "2.11.6"},
+	}},
+	Implementations: []app.Implementation{{
+		From: "2.11.6", Until: "2.11.6",
+		Provides: []role.Offer{role.Provide(role.AccessAddress, func(v role.Values, _ role.Set) role.Access { return access{v} })},
+		Prepare:  prepare,
+		Probe:    probe,
+	}},
 	Credentials: &app.CredentialGroup{Name: "access", Fields: []app.CredentialField{
 		{Label: "Mode", Key: modeKey},
 		{Label: "Address", Key: urlKey},
-		{Label: "Media directory", Key: "MEDIA_DIR"},
-		{Label: "Configuration directory", Key: "CONFIG_DIR"},
 	}},
 }
 
@@ -83,16 +98,15 @@ func ValidHost(host string) (string, error) {
 	return host, nil
 }
 
-// URL is the address that serves every web page, such as https://media.example.com.
-func URL(v app.Values) string { return v.Get(urlKey) }
+// access is the address role, read from Caddy's saved values.
+type access struct{ v role.Values }
 
-// Host is the name in URL, such as media.example.com.
-func Host(v app.Values) string { return v.Get(hostKey) }
+func (access) Name() string   { return name }
+func (a access) URL() string  { return a.v.Get(urlKey) }
+func (a access) Host() string { return a.v.Get(hostKey) }
+func (a access) Secure() bool { return scheme(a.v) == "https" }
 
-// Secure reports whether the pages are served over HTTPS.
-func Secure(v app.Values) bool { return scheme(v) == "https" }
-
-func scheme(v app.Values) string {
+func scheme(v role.Values) string {
 	if v.Get(modeKey) == Local {
 		return "http"
 	}
@@ -173,7 +187,7 @@ func askAccess(e *app.Env) error {
 		answers, err := e.UI.Ask(flow.Screen{
 			Title: "Own domain",
 			Body: `1. At your domain provider, create an A record that points your chosen name to this network's public IP address.
-2. On your router, forward TCP ports 80, 443, 5055, and 9091 to this computer.
+2. On your router, forward TCP ports ` + forwardedPorts(e.Routes) + ` to this computer.
 3. The following prompt requests the name, for example media.example.com.
 
 Let's Encrypt connects to this computer through those ports to issue the certificate. Until both steps are done, the pages do not open.`,
@@ -194,19 +208,32 @@ Let's Encrypt connects to this computer through those ports to issue the certifi
 	}
 	v.Set(modeKey, mode)
 	v.Set(hostKey, host)
-	return nil
+	return e.SaveValues()
+}
+
+// forwardedPorts lists every port Caddy publishes, as the router must forward them.
+func forwardedPorts(routes []app.Route) string {
+	ports := []string{"80", "443"}
+	for _, port := range app.OwnPorts(routes) {
+		ports = append(ports, strconv.Itoa(port))
+	}
+	return app.List(ports)
 }
 
 func prepare(e *app.Env) ([]string, error) {
 	certChanged := false
 	if e.Values.Get(modeKey) == Tailscale {
 		var err error
-		certChanged, err = tailscaleCert(e.Shell, e.ConfigPath("caddy", "certs", "cert.pem"), e.ConfigPath("caddy", "certs", "key.pem"), Host(e.Values))
+		certChanged, err = tailscaleCert(e.Shell, e.ConfigPath("caddy", "certs", "cert.pem"), e.ConfigPath("caddy", "certs", "key.pem"), e.Values.Get(hostKey))
 		if err != nil {
 			return nil, err
 		}
 	}
-	content, err := Caddyfile(e.Values, e.Routes)
+	check, err := role.Get(e.Roles, role.AdminSignIn).Check(name)
+	if err != nil {
+		return nil, err
+	}
+	content, err := Caddyfile(e.Values, e.Routes, check)
 	if err != nil {
 		return nil, err
 	}

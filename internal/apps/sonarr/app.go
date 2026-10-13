@@ -4,80 +4,34 @@ package sonarr
 import (
 	"embed"
 
-	"github.com/inayayousfi/selfnook/internal/app"
-	"github.com/inayayousfi/selfnook/internal/apps/caddy"
-	"github.com/inayayousfi/selfnook/internal/flow"
+	"github.com/inayayousfi/selfnook/internal/apps/servarr"
+	"github.com/inayayousfi/selfnook/internal/role"
 )
 
 //go:embed compose.yaml
 var compose embed.FS
 
-const keyName = "SONARR_API_KEY"
-
-var App = &app.App{
-	Name:       "sonarr",
-	Settings:   []app.Setting{{Key: keyName, Example: "replace_with_your_32_character_api_key", Required: true}},
-	Compose:    compose,
-	Services:   func(app.Values) []string { return []string{"sonarr-app"} },
-	ConfigDirs: []string{"sonarr"},
-	MediaDirs:  []string{"Series"},
-	Validate: func(v app.Values) error {
-		_, err := flow.ValidAPIKey(v.Get(keyName))
-		return err
+var App = servarr.App(servarr.Spec{
+	Name:         "sonarr",
+	Title:        "Sonarr",
+	Kind:         "series",
+	Role:         role.Series,
+	Service:      "sonarr-app",
+	Host:         "sonarr",
+	Port:         8989,
+	BasePath:     "/sonarr",
+	MediaDir:     "Series",
+	Events:       "On File Import, On File Upgrade, On Import Complete, On Rename, On Series Delete, On Episode File Delete, and On Episode File Delete For Upgrade",
+	TilePosition: 2,
+	Compose:      compose,
+	Digests: map[string]string{
+		"sha256:373159ba768e23a3a1c497d9f2b936addf8fd5b1fdce7dd6a14080ac928bfda0": "4.0.19.2979",
+		"sha256:0deb8db6c839ac475e9cd86277712772c40ba7f929a003d7e1de36c4b666bc13": "4.0.20.3014",
 	},
-	Setup: func(e *app.Env) error {
-		return e.Step("sonarr", !e.Values.Has(keyName), func() error {
-			answers, err := e.UI.Ask(Guide(caddy.URL(e.Values)))
-			if err != nil {
-				return err
-			}
-			e.Values.Set(keyName, answers[keyName])
-			return e.SaveValues()
-		})
+	Labels: map[string]string{
+		"4.0.19.2979-ls321": "4.0.19.2979",
+		"4.0.20.3014-ls328": "4.0.20.3014",
 	},
-	Routes: func(app.Values) []app.Route {
-		return []app.Route{{
-			Name:     "Sonarr",
-			Path:     "/sonarr",
-			Upstream: "sonarr-app:8989",
-			Internal: &app.Internal{Name: "sonarr", Port: 8989},
-		}}
-	},
-	Tiles: func(app.Values) []app.Tile {
-		return []app.Tile{{Group: "Admin", Position: 2, YAML: `    - Sonarr:
-        icon: sonarr.png
-        server: selfnook
-        container: selfnook-sonarr-app
-        href: "{{HOMEPAGE_VAR_URL}}/sonarr"
-        description: Manage series
-`}}
-	},
-	Credentials: &app.CredentialGroup{Name: "sonarr", Fields: []app.CredentialField{
-		{Label: "API key", Key: keyName, Kind: app.APIKey, UsedByStack: true},
-	}},
-}
-
-// APIKey is the key Sonarr generated, which other apps use to reach it.
-func APIKey(v app.Values) string { return v.Get(keyName) }
-
-// Guide connects Sonarr to the media folder and qBittorrent, then asks for its API key.
-func Guide(accessURL string) flow.Screen {
-	return flow.Screen{
-		Title: "Sonarr setup",
-		Body: `Open this link:
-` + accessURL + `/sonarr
-
-1. Open Settings > Media Management.
-2. Under Root Folders, click Add Root Folder.
-3. Select /media/Series and save it.
-4. Open Settings > Download Clients.
-5. Click Add, then select qBittorrent.
-6. Set Host to qbittorrent and Port to 8080. Leave Username and Password empty.
-7. Set Category to sonarr.
-8. Click Test, then Save.
-9. Open Settings > General > Security.
-10. Copy the API Key that Sonarr generated automatically. The next terminal prompt will ask for it.`,
-		Wait:   "Sonarr",
-		Fields: []flow.Field{flow.APIKeyField(keyName, "Sonarr")},
-	}
-}
+	From:  "4.0.19.2979",
+	Until: "4.0.20.3014",
+})

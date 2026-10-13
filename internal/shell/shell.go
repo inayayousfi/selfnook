@@ -22,6 +22,9 @@ type Cmd struct {
 	Terminal bool
 	// Check turns a non-zero exit code into an error.
 	Check bool
+	// Env adds environment variables to the program's own environment,
+	// replacing variables of the same name.
+	Env map[string]string
 }
 
 type Result struct {
@@ -63,6 +66,12 @@ func (s *OS) Run(c Cmd) (Result, error) {
 	}
 	command := exec.CommandContext(ctx, c.Args[0], c.Args[1:]...)
 	command.Dir = s.Dir
+	if len(c.Env) > 0 {
+		command.Env = os.Environ()
+		for key, value := range c.Env {
+			command.Env = append(command.Env, key+"="+value)
+		}
+	}
 	var stdout, stderr bytes.Buffer
 	run := command.Run
 	switch {
@@ -100,4 +109,9 @@ func (s *OS) Run(c Cmd) (Result, error) {
 func Found(name string) (string, bool) {
 	path, err := exec.LookPath(name)
 	return path, err == nil
+}
+
+// Capture runs args, collecting output without checking the exit code.
+func Capture(s Shell, args ...string) (Result, error) {
+	return s.Run(Cmd{Args: args, Capture: true})
 }

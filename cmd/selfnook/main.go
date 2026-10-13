@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -21,6 +22,7 @@ import (
 	"github.com/inayayousfi/selfnook/internal/flow"
 	"github.com/inayayousfi/selfnook/internal/shell"
 	"github.com/inayayousfi/selfnook/internal/stack"
+	"github.com/inayayousfi/selfnook/internal/state"
 	"github.com/inayayousfi/selfnook/internal/ui/cli"
 	"github.com/inayayousfi/selfnook/internal/ui/tui"
 )
@@ -29,8 +31,13 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
+var statePath string
+
 func run(args []string) int {
 	root, program, err := locate()
+	if err == nil {
+		statePath, err = state.Path()
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		return 1
@@ -39,13 +46,15 @@ func run(args []string) int {
 	if len(args) == 0 && interactive {
 		return report(tui.Run(func(ctx context.Context, ui flow.UI, output io.Writer, take func(func() error) error) *stack.Stack {
 			return &stack.Stack{
-				Root:    root,
-				Apps:    apps.All,
-				Shell:   &shell.OS{Context: ctx, Dir: root, Output: output, TakeTerminal: take},
-				UI:      ui,
-				Program: program,
+				Root:      root,
+				StatePath: statePath,
+				Apps:      apps.All,
+				Runtimes:  apps.Runtimes,
+				Shell:     &shell.OS{Context: ctx, Dir: root, Output: output, TakeTerminal: take},
+				UI:        ui,
+				Program:   program,
 			}
-		}, stack.CredentialGroups(apps.All)))
+		}, stack.CredentialGroups(apps.All)), os.Stderr)
 	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
 		printHelp(os.Stdout)
@@ -67,15 +76,14 @@ func run(args []string) int {
 		fmt.Printf("Usage: %s %s\n\n%s\n", stack.Command, usage, chosen.Detail)
 		return 0
 	}
-	if chosen.Name == "start" && len(rest) > 0 && rest[0] == "--log-file" {
+	var out, errOut io.Writer = os.Stdout, os.Stderr
+	if chosen.Logged && len(rest) > 0 && rest[0] == "--log-file" {
 		if len(rest) != 2 {
 			fmt.Fprintln(os.Stderr, "Error: --log-file needs a file path.")
 			return 2
 		}
-		if err := logTo(rest[1]); err != nil {
-			fmt.Fprintln(os.Stderr, "Error:", err)
-			return 1
-		}
+		log := &logFile{path: rest[1], command: chosen.Name}
+		out, errOut = log, log
 		rest = nil
 	}
 	allowed := 0
@@ -96,14 +104,18 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "\nCommand cancelled.")
 		os.Exit(130)
 	}()
+	ui := cli.New()
+	ui.Out = out
 	s := &stack.Stack{
-		Root:    root,
-		Apps:    apps.All,
-		Shell:   &shell.OS{Context: ctx, Dir: root, Output: os.Stdout},
-		UI:      cli.New(),
-		Program: program,
+		Root:      root,
+		StatePath: statePath,
+		Apps:      apps.All,
+		Runtimes:  apps.Runtimes,
+		Shell:     &shell.OS{Context: ctx, Dir: root, Output: out},
+		UI:        ui,
+		Program:   program,
 	}
-	return report(chosen.Run(s, rest))
+	return report(chosen.Run(s, rest), errOut)
 }
 
 // locate returns the folder that holds the stack, which is the folder of
@@ -119,30 +131,43 @@ func locate() (string, string, error) {
 	return filepath.Dir(program), program, nil
 }
 
-func report(err error) int {
+func report(err error, out io.Writer) int {
 	switch {
 	case err == nil:
 		return 0
 	case errors.Is(err, flow.ErrCancelled):
-		fmt.Fprintln(os.Stderr, "\nCommand cancelled.")
+		fmt.Fprintln(out, "\nCommand cancelled.")
 		return 130
 	}
-	fmt.Fprintln(os.Stderr, "Error:", err)
+	fmt.Fprintln(out, "Error:", err)
 	return 1
 }
 
-// logTo appends all output to path, for automatic start where no terminal exists.
-func logTo(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+// logFile appends output to path, for automatic start and scheduled checks
+// where no terminal exists. It opens the file and writes a dated header only
+// when the command first prints, so a run that prints nothing leaves the file
+// unchanged.
+type logFile struct {
+	path, command string
+	file          *os.File
+	mu            sync.Mutex
+}
+
+func (l *logFile) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
+			return 0, err
+		}
+		file, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return 0, err
+		}
+		l.file = file
+		fmt.Fprintf(file, "\n[%s] %s %s\n", time.Now().Format("2006-01-02 15:04:05"), stack.Command, l.command)
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	os.Stdout, os.Stderr = file, file
-	fmt.Fprintf(file, "\n[%s] %s start\n", time.Now().Format("2006-01-02 15:04:05"), stack.Command)
-	return nil
+	return l.file.Write(p)
 }
 
 func printHelp(out io.Writer) {

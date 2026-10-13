@@ -5,6 +5,9 @@ package stack
 import (
 	"errors"
 	"fmt"
+	"io"
+	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,36 +16,53 @@ import (
 
 	"github.com/inayayousfi/selfnook/internal/app"
 	"github.com/inayayousfi/selfnook/internal/flow"
-	"github.com/inayayousfi/selfnook/internal/settings"
+	"github.com/inayayousfi/selfnook/internal/role"
+	"github.com/inayayousfi/selfnook/internal/runtime"
 	"github.com/inayayousfi/selfnook/internal/shell"
+	"github.com/inayayousfi/selfnook/internal/state"
 )
 
 // Command is the program name shown in instructions.
 const Command = "selfnook"
 
-// Stack is one installation: the folder holding .env, config/, and the
-// generated Compose files.
+// runtimeRole is the name under which the state file records the runtime.
+const runtimeRole = "runtime"
+
+// Stack is one installation: the folder holding config/ and the generated
+// Compose files, and the state file holding every saved value.
 type Stack struct {
-	Root  string
-	Apps  []*app.App
-	Shell shell.Shell
-	UI    flow.UI
+	Root string
+	// StatePath is the state file.
+	StatePath string
+	Apps      []*app.App
+	// Runtimes are the container runtimes, the first being the default.
+	Runtimes []runtime.Factory
+	Shell    shell.Shell
+	UI       flow.UI
 	// Program is the executable that automatic start runs.
 	Program string
 	// Sleep waits between checks. Tests replace it.
 	Sleep func(time.Duration)
+	// Fetch downloads a file. Nil downloads over HTTPS; tests replace it.
+	Fetch func(url string) ([]byte, error)
 }
 
-// coreSettings are the .env values the stack itself owns.
-var coreSettings = []app.Setting{
-	{Key: "MEDIA_DIR", Example: "/absolute/path/to/Media", Required: true},
-	{Key: "CONFIG_DIR", Example: "/absolute/path/to/the/selfnook/folder/config", Required: true},
-	{Key: "PUID", Example: "1000", Required: true},
-	{Key: "PGID", Example: "1000", Required: true},
-	{Key: "TZ", Example: "Europe/Paris", Required: true},
+// fetch downloads url with Fetch, or over HTTPS when Fetch is nil.
+func (s *Stack) fetch(url string) ([]byte, error) {
+	if s.Fetch != nil {
+		return s.Fetch(url)
+	}
+	client := &http.Client{Timeout: 2 * time.Minute}
+	response, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s answered %s", url, response.Status)
+	}
+	return io.ReadAll(response.Body)
 }
-
-func (s *Stack) envFile() string { return filepath.Join(s.Root, ".env") }
 
 func (s *Stack) sleep(d time.Duration) {
 	if s.Sleep != nil {
@@ -52,111 +72,437 @@ func (s *Stack) sleep(d time.Duration) {
 	time.Sleep(d)
 }
 
-// env gives one app's hook its view of the values and every app's contributions.
-func (s *Stack) env(a *app.App, values *settings.Values, progress *settings.Progress) *app.Env {
-	routes, tiles := s.contributions(values)
-	return &app.Env{
-		Root:     s.Root,
-		Values:   app.ValuesFor(values, a),
-		Shell:    s.Shell,
-		UI:       s.UI,
-		Routes:   routes,
-		Tiles:    tiles,
-		Progress: progress,
-		SaveValues: func() error {
-			return settings.Write(s.envFile(), values)
-		},
-		Sleep: s.sleep,
-	}
-}
-
-// contributions collects every app's routes and tiles in registry order.
-func (s *Stack) contributions(values *settings.Values) ([]app.Route, []app.Tile) {
-	var routes []app.Route
-	var tiles []app.Tile
-	for _, a := range s.Apps {
-		v := app.ValuesFor(values, a)
-		if a.Routes != nil {
-			routes = append(routes, a.Routes(v)...)
-		}
-		if a.Tiles != nil {
-			tiles = append(tiles, a.Tiles(v)...)
-		}
-	}
-	return routes, tiles
-}
-
-func (s *Stack) waitForDocker() error {
-	return shell.WaitForDocker(s.Shell, s.sleep)
+// session is one command's view of the installation: the saved state, the
+// roles resolved from it, and the version each app runs.
+type session struct {
+	*Stack
+	saved   *state.State
+	runtime runtime.Runtime
+	// versions holds each app's version for choosing its implementation:
+	// the pinned one until its containers run, then the detected one.
+	versions map[string]string
+	warned   map[string]bool
+	sets     map[string]*role.Set
+	steps    bool
 }
 
 var errNoSetup = errors.New("Run '" + Command + " setup' first.")
 
-// load reads .env and checks that every app has what it needs to start.
-func (s *Stack) load() (*settings.Values, error) {
-	values, err := s.readSaved()
+// open reads the state file, moving an earlier .env into it first. found
+// is false when neither existed.
+func (s *Stack) open() (*session, bool, error) {
+	saved, found, err := state.Read(s.StatePath)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		if saved, found, err = s.importEnv(); err != nil {
+			return nil, false, err
+		}
+	}
+	ses := &session{Stack: s, saved: saved, versions: map[string]string{}, warned: map[string]bool{}}
+	for _, a := range s.Apps {
+		ses.versions[a.Name] = a.Pinned()
+	}
+	factory := s.Runtimes[0]
+	if name := saved.Roles[runtimeRole]; name != "" {
+		index := slices.IndexFunc(s.Runtimes, func(f runtime.Factory) bool { return f.Name == name })
+		if index < 0 {
+			return nil, false, fmt.Errorf("The saved settings name an unknown container runtime: %s.", name)
+		}
+		factory = s.Runtimes[index]
+	}
+	saved.Roles[runtimeRole] = factory.Name
+	ses.runtime = factory.New(runtime.Options{Shell: s.Shell, Env: ses.composeEnv, Sleep: s.sleep})
+	return ses, found, nil
+}
+
+func (ses *session) save() error { return state.Write(ses.StatePath, ses.saved) }
+
+// Done and Complete record guided setup steps in the state file.
+func (ses *session) Done(step string) bool { return ses.saved.Done(step) }
+
+func (ses *session) Complete(step string) error {
+	ses.saved.Complete(step)
+	return ses.save()
+}
+
+// roleNames lists every role an app provides, in registry order.
+func (ses *session) roleNames() []role.Info {
+	var infos []role.Info
+	for _, a := range ses.Apps {
+		for _, info := range a.Provides(ses.versions[a.Name]) {
+			if !slices.ContainsFunc(infos, func(i role.Info) bool { return i.Name == info.Name }) {
+				infos = append(infos, info)
+			}
+		}
+	}
+	return infos
+}
+
+func (ses *session) providers(name string) []*app.App {
+	var found []*app.App
+	for _, a := range ses.Apps {
+		if slices.ContainsFunc(a.Provides(ses.versions[a.Name]), func(i role.Info) bool { return i.Name == name }) {
+			found = append(found, a)
+		}
+	}
+	return found
+}
+
+// assignRoles makes sure every role has the app that fills it. A role with
+// one provider gets it. A role with several is asked when ask is set, and
+// otherwise stops the command until setup chooses it.
+func (ses *session) assignRoles(ask bool) error {
+	for _, info := range ses.roleNames() {
+		candidates := ses.providers(info.Name)
+		if slices.ContainsFunc(candidates, func(a *app.App) bool { return a.Name == ses.saved.Roles[info.Name] }) {
+			continue
+		}
+		if len(candidates) == 1 {
+			ses.saved.Roles[info.Name] = candidates[0].Name
+			continue
+		}
+		if !ask {
+			return errNoSetup
+		}
+		if err := ses.chooseProvider(info, candidates); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// chooseProvider asks which app fills a role, listing each candidate's options.
+func (ses *session) chooseProvider(info role.Info, candidates []*app.App) error {
+	var options []flow.Option
+	owners := map[string]*app.App{}
+	for _, a := range candidates {
+		for _, option := range a.Options {
+			value := a.Name + "/" + option.Value
+			owners[value] = a
+			options = append(options, flow.Option{Value: value, Label: option.Label, Detail: option.Detail})
+		}
+	}
+	answers, err := ses.UI.Ask(flow.Screen{
+		Title:  info.Title,
+		Fields: []flow.Field{{Key: "provider", Prompt: info.Prompt, Kind: flow.Choice, Default: options[0].Value, Options: options}},
+	})
+	if err != nil {
+		return err
+	}
+	chosen := owners[answers["provider"]]
+	ses.saved.Roles[info.Name] = chosen.Name
+	if chosen.Choose != nil {
+		_, option, _ := strings.Cut(answers["provider"], "/")
+		chosen.Choose(app.ValuesFor(ses.saved, chosen), option)
+	}
+	return ses.save()
+}
+
+// active lists the apps that run: those that provide no role, and those
+// assigned to a role they provide.
+func (ses *session) active() []*app.App {
+	var apps []*app.App
+	for _, a := range ses.Apps {
+		provides := a.Provides(ses.versions[a.Name])
+		if len(provides) == 0 || slices.ContainsFunc(provides, func(i role.Info) bool { return ses.saved.Roles[i.Name] == a.Name }) {
+			apps = append(apps, a)
+		}
+	}
+	return apps
+}
+
+// impl is the implementation for the app's current version. When none
+// covers that version, it warns once and uses the built-in one.
+func (ses *session) impl(a *app.App) *app.Implementation {
+	version := ses.versions[a.Name]
+	impl, exact := a.Implementation(version)
+	if !exact && !ses.warned[a.Name] {
+		ses.warned[a.Name] = true
+		ses.UI.Say(versionWarning(a, version))
+	}
+	return impl
+}
+
+func versionWarning(a *app.App, version string) string {
+	written := "These steps were written for " + a.Title + " " + a.Pinned() + " and may not match exactly. Updating " + a.Title + " or Selfnook may help."
+	if version == "" {
+		return "Selfnook cannot tell which version of " + a.Title + " runs. " + written
+	}
+	return a.Title + " " + version + " runs, but Selfnook has no steps for that version. " + written
+}
+
+// roles is what app a may read: each role it needs, bound to the app that fills it.
+func (ses *session) roles(a *app.App) role.Set {
+	return *ses.roleSet(a.Name, a.Needs)
+}
+
+func (ses *session) roleSet(owner string, needs []role.Role) *role.Set {
+	if ses.sets == nil {
+		ses.sets = map[string]*role.Set{}
+	}
+	if set, ok := ses.sets[owner]; ok {
+		return set
+	}
+	filled := map[string]role.Bound{}
+	set := role.NewSet(owner, needs, filled)
+	ses.sets[owner] = &set
+	for _, need := range needs {
+		name := need.Info().Name
+		provider := ses.app(ses.saved.Roles[name])
+		if provider == nil {
+			continue
+		}
+		for _, offer := range ses.impl(provider).Provides {
+			if offer.Info().Name == name {
+				filled[name] = role.Bound{Offer: offer, Values: app.ValuesFor(ses.saved, provider), Roles: *ses.roleSet(provider.Name, provider.Needs)}
+			}
+		}
+	}
+	return &set
+}
+
+func (ses *session) app(name string) *app.App {
+	for _, a := range ses.Apps {
+		if a.Name == name {
+			return a
+		}
+	}
+	return nil
+}
+
+// coreRoles are the roles the stack itself reads. They form one set, so the
+// set cached for the stack holds each of them.
+var coreRoles = []role.Role{role.AccessAddress, role.VPN, role.AdminSignIn}
+
+// core is the set of roles the stack itself reads.
+func (ses *session) core() role.Set {
+	return *ses.roleSet(state.Core, coreRoles)
+}
+
+// access is the address that serves every web page.
+func (ses *session) access() role.Access {
+	return role.Get(ses.core(), role.AccessAddress)
+}
+
+// contributions collects every active app's routes, tiles, and shared
+// network needs in registry order.
+func (ses *session) contributions() app.ComposeData {
+	var data app.ComposeData
+	for _, a := range ses.active() {
+		impl, v, r := ses.impl(a), app.ValuesFor(ses.saved, a), ses.roles(a)
+		if impl.Routes != nil {
+			data.Routes = append(data.Routes, impl.Routes(v, r)...)
+		}
+		if impl.Tiles != nil {
+			data.Tiles = append(data.Tiles, impl.Tiles(v, r)...)
+		}
+		if impl.Clients != nil {
+			data.Clients = append(data.Clients, impl.Clients(v, r)...)
+		}
+		if impl.Shared != nil {
+			data.Shared = append(data.Shared, *impl.Shared)
+		}
+	}
+	return data
+}
+
+// composeEnv is every saved value that has an owner, then what each active
+// app's Compose fragment reads from its roles. Unclaimed values stay a
+// private record.
+func (ses *session) composeEnv() map[string]string {
+	env := map[string]string{}
+	for _, owner := range slices.Sorted(maps.Keys(ses.saved.Values)) {
+		if owner != state.Unclaimed {
+			maps.Copy(env, ses.saved.Values[owner])
+		}
+	}
+	data := ses.contributions()
+	for _, a := range ses.active() {
+		if a.Environment != nil {
+			maps.Copy(env, a.Environment(ses.roles(a), data))
+		}
+	}
+	return env
+}
+
+// env gives one app's hook its values, roles, and every app's contributions.
+func (ses *session) env(a *app.App) *app.Env {
+	data := ses.contributions()
+	e := &app.Env{
+		Values:     app.ValuesFor(ses.saved, a),
+		Roles:      ses.roles(a),
+		Runtime:    ses.runtime,
+		Shell:      ses.Shell,
+		UI:         ses.UI,
+		Version:    ses.versions[a.Name],
+		Routes:     data.Routes,
+		Tiles:      data.Tiles,
+		Clients:    data.Clients,
+		BehindVPN:  ses.behindTitles(),
+		SaveValues: ses.save,
+		Sleep:      ses.sleep,
+		Fetch:      ses.fetch,
+	}
+	if ses.steps {
+		e.Steps = ses
+	}
+	return e
+}
+
+// behindTitles are the titles of the active apps behind the VPN.
+func (ses *session) behindTitles() []string {
+	var titles []string
+	for _, a := range ses.active() {
+		if len(a.BehindVPN) > 0 {
+			titles = append(titles, a.Title)
+		}
+	}
+	return titles
+}
+
+// gatewayLogEvery is how many checks, 2 seconds apart, pass between two
+// reports of the gateway's latest message: one minute.
+const gatewayLogEvery = 30
+
+// waitForGateway waits without a time limit until the gateway lets traffic
+// pass, because a VPN can take long to connect. It reports the wait once,
+// then what the gateway says is wrong every minute, so a refused login shows.
+// It stops when the gateway's container does not run.
+func (ses *session) waitForGateway() error {
+	gateway := role.Get(ses.core(), role.VPN)
+	for check := 0; ; check++ {
+		ready, err := gateway.Ready(ses.runtime)
+		if err != nil || ready {
+			return err
+		}
+		if check == 0 {
+			ses.UI.Say("Waiting for the VPN connection. " + app.List(ses.behindTitles()) + " will start when it connects.")
+		} else if check%gatewayLogEvery == 0 {
+			if problem := gateway.Problem(ses.runtime); problem != "" {
+				ses.UI.Say(problem)
+			}
+		}
+		ses.sleep(2 * time.Second)
+	}
+}
+
+// signInChecks is how many times waitForSignIn checks, 2 seconds apart:
+// five minutes.
+const signInChecks = 150
+
+// waitForSignIn waits until the admin sign-in page works, so the links the
+// setup guides print do not open a page that is still starting.
+func (ses *session) waitForSignIn() error {
+	if ses.saved.Roles[role.AdminSignIn.Info().Name] == "" {
+		return nil
+	}
+	signIn := role.Get(ses.core(), role.AdminSignIn)
+	for check := range signInChecks {
+		ready, err := signIn.Ready(ses.runtime)
+		if err != nil || ready {
+			return err
+		}
+		if check == 0 {
+			ses.UI.Say("Waiting for " + signIn.Name() + " to finish starting.")
+		}
+		ses.sleep(2 * time.Second)
+	}
+	return errors.New(signIn.Name() + " did not finish starting within five minutes.")
+}
+
+// detect records the version of every image of apps, from their running
+// containers, and uses it to choose their implementations. A service
+// without a container runs the pinned image when it starts.
+func (ses *session) detect(apps []*app.App) error {
+	for _, a := range apps {
+		for i, image := range a.Images {
+			found, err := ses.runtime.Image(image.Service)
+			if err != nil {
+				return err
+			}
+			var version state.Version
+			if len(found.Digests) == 0 && found.Label == "" {
+				version = app.PinnedVersion(a.Compose, image)
+			} else {
+				var ask func() (string, error)
+				if image.Ask != nil {
+					ask = func() (string, error) { return image.Ask(ses.env(a)) }
+				}
+				version = app.Detect(image, found, ask)
+			}
+			ses.saved.Versions[image.Service] = version
+			if i == 0 {
+				ses.versions[a.Name] = version.Version
+			}
+		}
+	}
+	// Providers may now run other implementations, which offer their roles.
+	ses.sets = nil
+	return ses.save()
+}
+
+// load reads the saved state and checks that every active app has what it
+// needs to start.
+func (s *Stack) load() (*session, error) {
+	ses, found, err := s.open()
 	if err != nil {
 		return nil, err
 	}
+	if !found {
+		return nil, errNoSetup
+	}
+	if err := ses.assignRoles(false); err != nil {
+		return nil, err
+	}
 	var missing []string
-	for _, setting := range s.settings() {
-		if setting.Required && !values.Has(setting.Key) {
-			missing = append(missing, setting.Key)
+	for _, a := range append([]*app.App{app.Core}, ses.active()...) {
+		v := app.ValuesFor(ses.saved, a)
+		for _, setting := range a.Settings {
+			if setting.Required && !v.Has(setting.Key) {
+				missing = append(missing, a.Title+" "+setting.Key)
+			}
 		}
 	}
 	if len(missing) > 0 {
 		slices.Sort(missing)
-		return nil, fmt.Errorf("Missing required .env values: %s. Run '%s setup' to add them.", strings.Join(missing, ", "), Command)
+		return nil, fmt.Errorf("Missing saved settings: %s. Run '%s setup' to add them.", strings.Join(missing, ", "), Command)
 	}
+	core := app.ValuesFor(ses.saved, app.Core)
 	for _, key := range []string{"MEDIA_DIR", "CONFIG_DIR"} {
-		if !filepath.IsAbs(filepath.FromSlash(values.Get(key))) {
+		if !filepath.IsAbs(filepath.FromSlash(core.Get(key))) {
 			return nil, fmt.Errorf("%s must be an absolute path.", key)
 		}
 	}
-	for _, a := range s.Apps {
+	for _, a := range ses.active() {
 		if a.Validate != nil {
-			if err := a.Validate(app.ValuesFor(values, a)); err != nil {
+			if err := a.Validate(app.ValuesFor(ses.saved, a)); err != nil {
 				return nil, err
 			}
 		}
 	}
-	return values, nil
+	return ses, nil
 }
 
-// settings lists the core settings, then each app's settings in registry order.
-func (s *Stack) settings() []app.Setting {
-	all := slices.Clone(coreSettings)
-	for _, a := range s.Apps {
-		all = append(all, a.Settings...)
-	}
-	return all
-}
-
-// readSaved reads .env without requiring a finished setup.
-func (s *Stack) readSaved() (*settings.Values, error) {
-	if _, err := os.Stat(s.envFile()); err != nil {
-		return nil, errNoSetup
-	}
-	return settings.Read(s.envFile())
-}
-
-func (s *Stack) derive(values *settings.Values) {
-	for _, a := range s.Apps {
+func (ses *session) derive() {
+	for _, a := range ses.active() {
 		if a.Derive != nil {
-			a.Derive(app.ValuesFor(values, a))
+			a.Derive(app.ValuesFor(ses.saved, a))
 		}
 	}
 }
 
-func (s *Stack) createDirectories(values *settings.Values) error {
-	for _, a := range s.Apps {
+func (ses *session) createDirectories() error {
+	core := app.ValuesFor(ses.saved, app.Core)
+	for _, a := range ses.active() {
 		for _, dir := range a.MediaDirs {
-			if err := os.MkdirAll(filepath.Join(values.Get("MEDIA_DIR"), dir), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(core.Get("MEDIA_DIR"), dir), 0o755); err != nil {
 				return err
 			}
 		}
 		for _, dir := range a.ConfigDirs {
-			if err := os.MkdirAll(filepath.Join(values.Get("CONFIG_DIR"), filepath.FromSlash(dir)), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(core.Get("CONFIG_DIR"), filepath.FromSlash(dir)), 0o755); err != nil {
 				return err
 			}
 		}
@@ -164,41 +510,18 @@ func (s *Stack) createDirectories(values *settings.Values) error {
 	return nil
 }
 
-// retiredProject is the Compose project name that earlier versions used.
-const retiredProject = "media-stack"
-
-// removeRetiredProject removes the containers and network of an install
-// made under the earlier project name, which would otherwise hold the ports
-// and the address range. Configuration and media folders are kept.
-func (s *Stack) removeRetiredProject() error {
-	containers, err := shell.Capture(s.Shell, "docker", "ps", "--all", "--quiet", "--filter", "label=com.docker.compose.project="+retiredProject)
-	if err != nil {
-		return err
-	}
-	network, err := shell.Capture(s.Shell, "docker", "network", "inspect", retiredProject)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(containers.Stdout) == "" && network.Code != 0 {
+// removeRetiredDirs removes what replaced apps left under CONFIG_DIR.
+func (ses *session) removeRetiredDirs() error {
+	configDir := app.ValuesFor(ses.saved, app.Core).Get("CONFIG_DIR")
+	if configDir == "" {
 		return nil
 	}
-	if err := shell.Compose(s.Shell, "--project-name", retiredProject, "down", "--remove-orphans"); err != nil {
-		return err
-	}
-	_, err = shell.Capture(s.Shell, "docker", "image", "rm", retiredProject+"/vpn-country")
-	return err
-}
-
-// recreateNetworkIfNeeded removes the stack when its network uses another
-// address range, so Compose recreates it with the expected one.
-func (s *Stack) recreateNetworkIfNeeded() error {
-	result, err := shell.Capture(s.Shell, "docker", "network", "inspect", app.Name, "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}")
-	if err != nil {
-		return err
-	}
-	subnet := strings.TrimSpace(result.Stdout)
-	if result.Code == 0 && subnet != app.NetworkSubnet {
-		return shell.Compose(s.Shell, "down", "--remove-orphans")
+	for _, a := range ses.Apps {
+		for _, dir := range a.RetiredConfigDirs {
+			if err := os.RemoveAll(filepath.Join(configDir, filepath.FromSlash(dir))); err != nil {
+				return fmt.Errorf("Cannot remove the unused folder %s: %w", dir, err)
+			}
+		}
 	}
 	return nil
 }
@@ -216,63 +539,105 @@ func (e *StoppedError) Error() string {
 
 func (e *StoppedError) Unwrap() error { return e.Err }
 
-// startServices stops the services behind the VPN, runs every app's Prepare
-// hook, starts the other containers, runs every Started hook, then starts
-// the services behind the VPN.
-func (s *Stack) startServices(values *settings.Values, progress *settings.Progress) error {
-	var behindVPN, active, inactive []string
-	for _, a := range s.Apps {
+// startServices stops the services behind the VPN, runs every Prepare hook,
+// starts the other containers, runs every Started hook, waits for the
+// gateway, then starts the services behind the VPN. Containers of inactive
+// apps are removed. A container that runs another image than the pinned one
+// starts by name as it is, so Compose does not replace it.
+func (ses *session) startServices() error {
+	list, err := ses.keptContainers(ses.active())
+	if err != nil {
+		return err
+	}
+	keptNames := keptServices(list)
+	var behindVPN, active []string
+	var front, behind []*app.App
+	for _, a := range ses.active() {
 		behindVPN = append(behindVPN, a.BehindVPN...)
-		var services []string
-		if a.Services != nil {
-			services = a.Services(app.ValuesFor(values, a))
+		if len(a.BehindVPN) > 0 {
+			behind = append(behind, a)
+		} else {
+			front = append(front, a)
 		}
-		for _, service := range a.Optional {
-			if !slices.Contains(services, service) {
-				inactive = append(inactive, service)
-			}
+		if a.Services == nil {
+			continue
 		}
-		for _, service := range services {
+		for _, service := range a.Services(app.ValuesFor(ses.saved, a)) {
 			if !slices.Contains(a.BehindVPN, service) {
 				active = append(active, service)
 			}
 		}
 	}
-	if err := shell.Compose(s.Shell, append([]string{"stop"}, append(behindVPN, inactive...)...)...); err != nil {
-		return err
+	if len(behindVPN) > 0 {
+		if err := ses.runtime.Stop(behindVPN...); err != nil {
+			return err
+		}
 	}
-	if err := s.startWhileVPNServicesStopped(values, progress, active); err != nil {
+	if err := ses.startWhileVPNServicesStopped(active, keptNames, front); err != nil {
 		return &StoppedError{Services: behindVPN, Err: err}
 	}
-	if err := shell.Compose(s.Shell, append([]string{"up", "-d", "--no-deps"}, behindVPN...)...); err != nil {
-		return &StoppedError{Services: behindVPN, Err: err}
+	if len(behindVPN) > 0 {
+		if err := ses.waitForGateway(); err != nil {
+			return &StoppedError{Services: behindVPN, Err: err}
+		}
+		if err := ses.up(behindVPN, keptNames, false); err != nil {
+			return &StoppedError{Services: behindVPN, Err: err}
+		}
+		if err := ses.detect(behind); err != nil {
+			return err
+		}
 	}
+	ses.reportKept(list)
 	return nil
 }
 
-func (s *Stack) startWhileVPNServicesStopped(values *settings.Values, progress *settings.Progress, active []string) error {
+// up creates or updates services through Compose, except those in kept,
+// which start by name as they are.
+func (ses *session) up(services, kept []string, removeOrphans bool) error {
+	var compose, byName []string
+	for _, service := range services {
+		if slices.Contains(kept, service) {
+			byName = append(byName, service)
+		} else {
+			compose = append(compose, service)
+		}
+	}
+	// Compose starts every service when none is named.
+	if len(compose) > 0 {
+		if err := ses.runtime.Up(compose, removeOrphans); err != nil {
+			return err
+		}
+	}
+	return ses.runtime.Start(byName...)
+}
+
+func (ses *session) startWhileVPNServicesStopped(active, kept []string, started []*app.App) error {
 	var restart []string
-	for _, a := range s.Apps {
-		if a.Prepare == nil {
+	for _, a := range ses.active() {
+		impl := ses.impl(a)
+		if impl.Prepare == nil {
 			continue
 		}
-		services, err := a.Prepare(s.env(a, values, progress))
+		services, err := impl.Prepare(ses.env(a))
 		if err != nil {
 			return err
 		}
 		restart = append(restart, services...)
 	}
-	if err := shell.Compose(s.Shell, append([]string{"up", "-d", "--no-deps", "--remove-orphans"}, active...)...); err != nil {
+	if err := ses.up(active, kept, true); err != nil {
 		return err
 	}
 	for _, service := range restart {
-		if err := shell.Compose(s.Shell, "restart", service); err != nil {
+		if err := ses.runtime.Restart(service); err != nil {
 			return err
 		}
 	}
-	for _, a := range s.Apps {
-		if a.Started != nil {
-			if err := a.Started(s.env(a, values, progress)); err != nil {
+	if err := ses.detect(started); err != nil {
+		return err
+	}
+	for _, a := range ses.active() {
+		if impl := ses.impl(a); impl.Started != nil {
+			if err := impl.Started(ses.env(a)); err != nil {
 				return err
 			}
 		}
@@ -282,38 +647,35 @@ func (s *Stack) startWhileVPNServicesStopped(values *settings.Values, progress *
 
 // Start starts the stack with the saved values.
 func (s *Stack) Start() error {
-	values, err := s.load()
+	ses, err := s.load()
 	if err != nil {
 		return err
 	}
-	if err := s.migrate(values); err != nil {
+	if err := ses.removeRetiredDirs(); err != nil {
 		return err
 	}
-	s.derive(values)
-	if err := settings.Write(s.envFile(), values); err != nil {
+	ses.derive()
+	if err := ses.save(); err != nil {
 		return err
 	}
-	if err := s.waitForDocker(); err != nil {
+	if err := ses.runtime.Ready(); err != nil {
 		return err
 	}
-	if err := s.writeCompose(values); err != nil {
+	if err := ses.writeCompose(); err != nil {
 		return err
 	}
-	if err := s.removeRetiredProject(); err != nil {
+	if err := ses.runtime.Prepare(); err != nil {
 		return err
 	}
-	if err := s.recreateNetworkIfNeeded(); err != nil {
+	if err := ses.createDirectories(); err != nil {
 		return err
 	}
-	if err := s.createDirectories(values); err != nil {
+	if err := ses.startServices(); err != nil {
 		return err
 	}
-	if err := s.startServices(values, nil); err != nil {
-		return err
-	}
-	for _, a := range s.Apps {
-		if a.AfterStart != nil {
-			if err := a.AfterStart(s.env(a, values, nil)); err != nil {
+	for _, a := range ses.active() {
+		if impl := ses.impl(a); impl.AfterStart != nil {
+			if err := impl.AfterStart(ses.env(a)); err != nil {
 				return err
 			}
 		}
@@ -321,40 +683,212 @@ func (s *Stack) Start() error {
 	return nil
 }
 
-// Stop removes the containers and network, keeping configuration and media.
+// Stop stops every container and keeps it, so the next start finds the
+// containers as they were, including one the user changed. It does not wait
+// for Docker: when Docker does not answer, no container runs, which is what
+// stopping asks for. This keeps a shutdown from waiting.
 func (s *Stack) Stop() error {
-	return s.compose("down")
+	ses, found, err := s.open()
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errNoSetup
+	}
+	if err := ses.assignRoles(false); err != nil {
+		return err
+	}
+	reachable, err := ses.runtime.Reachable()
+	if err != nil {
+		return err
+	}
+	if !reachable {
+		s.UI.Say("Docker does not answer, so no container runs.")
+		return nil
+	}
+	behind, front := ses.stopGroups()
+	if err := ses.runtime.Stop(behind...); err != nil {
+		return err
+	}
+	return ses.runtime.Stop(front...)
 }
 
-// Status shows Compose's status for every service.
+// stopGroups splits the active services into those behind the VPN and the
+// rest. Stop stops the first group before the second, so no service loses its
+// network while it still runs: one docker stop command stops its containers
+// at the same time.
+func (ses *session) stopGroups() (behind, front []string) {
+	for _, a := range ses.active() {
+		if a.Services == nil {
+			continue
+		}
+		for _, service := range a.Services(app.ValuesFor(ses.saved, a)) {
+			if slices.Contains(a.BehindVPN, service) {
+				behind = append(behind, service)
+			} else {
+				front = append(front, service)
+			}
+		}
+	}
+	return behind, front
+}
+
+// probeWait is how long a restarted app gets before it is probed again.
+const probeWait = 10 * time.Second
+
+// Check restarts the containers of every app whose running containers cannot
+// be reached from the computer, as after Docker Desktop restores port
+// forwards to outdated container addresses, then probes them again. It
+// changes nothing when Docker does not answer or an app's containers are not
+// all running, so a stopped stack stays stopped.
+func (s *Stack) Check() error {
+	ses, found, err := s.open()
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errNoSetup
+	}
+	if err := ses.assignRoles(false); err != nil {
+		return err
+	}
+	if reachable, err := ses.runtime.Reachable(); err != nil || !reachable {
+		return err
+	}
+	for _, a := range ses.active() {
+		impl := ses.impl(a)
+		if impl.Probe == nil || a.Services == nil {
+			continue
+		}
+		services := a.Services(app.ValuesFor(ses.saved, a))
+		running, err := ses.allRunning(services)
+		if err != nil || !running {
+			return err
+		}
+		problem, err := impl.Probe(ses.env(a))
+		if err != nil || problem == "" {
+			return err
+		}
+		s.UI.Say(problem + " Restarting " + a.Title + ".")
+		if err := ses.runtime.Stop(services...); err != nil {
+			return err
+		}
+		if err := ses.runtime.Start(services...); err != nil {
+			return err
+		}
+		ses.sleep(probeWait)
+		if problem, err = impl.Probe(ses.env(a)); err != nil {
+			return err
+		}
+		if problem != "" {
+			return errors.New(problem)
+		}
+		s.UI.Say(a.Title + " answers again.")
+	}
+	return nil
+}
+
+// allRunning reports whether the container of every service runs.
+func (ses *session) allRunning(services []string) (bool, error) {
+	for _, service := range services {
+		state, err := ses.runtime.State(service)
+		if err != nil || state != "running" {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// Update lists every container that runs another image than this release
+// pins and asks, for each one, whether to replace it. Replaced containers are
+// deleted, then the stack starts, which creates them from the pinned images.
+// Configuration and media stay in their folders.
+func (s *Stack) Update() error {
+	ses, err := s.load()
+	if err != nil {
+		return err
+	}
+	if err := ses.runtime.Ready(); err != nil {
+		return err
+	}
+	list, err := ses.keptContainers(ses.active())
+	if err != nil {
+		return err
+	}
+	if len(list) == 0 {
+		s.UI.Say("Every container runs the version this release ships.")
+		return nil
+	}
+	var replace []string
+	for _, k := range list {
+		answers, err := s.UI.Ask(flow.Screen{Fields: []flow.Field{{
+			Key: "replace", Prompt: "Replace " + k.describe() + "?", Kind: flow.YesNo, Default: "no",
+		}}})
+		if err != nil {
+			return err
+		}
+		if answers["replace"] == "yes" {
+			replace = append(replace, k.service)
+		}
+	}
+	if len(replace) == 0 {
+		s.UI.Say("No container replaced.")
+		return nil
+	}
+	if err := ses.runtime.Remove(replace...); err != nil {
+		return err
+	}
+	return s.Start()
+}
+
+// Status shows every service's state.
 func (s *Stack) Status() error {
-	return s.compose("ps")
-}
-
-func (s *Stack) compose(args ...string) error {
-	values, err := s.readSaved()
+	ses, err := s.ready()
 	if err != nil {
 		return err
 	}
-	if err := s.waitForDocker(); err != nil {
-		return err
-	}
-	if err := s.writeCompose(values); err != nil {
-		return err
-	}
-	return shell.Compose(s.Shell, args...)
+	return ses.runtime.Status()
 }
 
-// AppStatus shows one app's own health report.
-func (s *Stack) AppStatus(a *app.App) error {
-	values, err := s.load()
+// ready reads the saved state, waits for the runtime, and writes the Compose files.
+func (s *Stack) ready() (*session, error) {
+	ses, found, err := s.open()
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, errNoSetup
+	}
+	if err := ses.assignRoles(false); err != nil {
+		return nil, err
+	}
+	if err := ses.runtime.Ready(); err != nil {
+		return nil, err
+	}
+	if err := ses.writeCompose(); err != nil {
+		return nil, err
+	}
+	return ses, nil
+}
+
+// RoleStatus shows the health report of the app that fills role r.
+func (s *Stack) RoleStatus(r role.Role) error {
+	ses, err := s.load()
 	if err != nil {
 		return err
 	}
-	if err := s.waitForDocker(); err != nil {
+	if err := ses.runtime.Ready(); err != nil {
 		return err
 	}
-	text, err := a.Status(s.env(a, values, nil))
+	a := ses.app(ses.saved.Roles[r.Info().Name])
+	if err := ses.detect([]*app.App{a}); err != nil {
+		return err
+	}
+	impl := ses.impl(a)
+	if impl.Status == nil {
+		return fmt.Errorf("%s has no status report.", a.Title)
+	}
+	text, err := impl.Status(ses.env(a))
 	if err != nil {
 		return err
 	}

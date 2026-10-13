@@ -53,6 +53,9 @@ type Screen struct {
 	// application is configured, before the fields are asked.
 	Wait   string
 	Fields []Field
+	// Answered, when set, receives each value as soon as it is accepted,
+	// before the next field is asked. An error ends the screen.
+	Answered func(key, value string) error
 }
 
 // Answers maps field keys to entered values.

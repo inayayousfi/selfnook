@@ -2,7 +2,6 @@ package stack
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,29 +10,29 @@ import (
 	"github.com/inayayousfi/selfnook/internal/app"
 	"github.com/inayayousfi/selfnook/internal/autostart"
 	"github.com/inayayousfi/selfnook/internal/flow"
-	"github.com/inayayousfi/selfnook/internal/settings"
-	"github.com/inayayousfi/selfnook/internal/shell"
 )
 
 // Setup asks every question, starts the stack, guides through each app's
 // first configuration, and installs automatic start. Progress is saved, so
 // an interrupted setup resumes where it stopped.
 func (s *Stack) Setup() error {
-	if err := s.waitForDocker(); err != nil {
-		return err
-	}
-	s.UI.Say("This setup saves progress and can be rerun after an interruption.")
-
-	values, err := settings.Read(s.envFile())
+	ses, _, err := s.open()
 	if err != nil {
 		return err
 	}
-	if err := s.migrate(values); err != nil {
+	if err := ses.runtime.Ready(); err != nil {
 		return err
 	}
+	s.UI.Say("This setup saves progress and can be rerun after an interruption.")
+	ses.steps = true
+	if err := ses.removeRetiredDirs(); err != nil {
+		return err
+	}
+
+	core := app.ValuesFor(ses.saved, app.Core)
 	var mediaDir string
-	if values.Has("MEDIA_DIR") {
-		if mediaDir, err = normalizedPath(values.Get("MEDIA_DIR")); err != nil {
+	if core.Has("MEDIA_DIR") {
+		if mediaDir, err = normalizedPath(core.Get("MEDIA_DIR")); err != nil {
 			return err
 		}
 		s.UI.Say("Reusing media directory: " + mediaDir)
@@ -44,53 +43,53 @@ func (s *Stack) Setup() error {
 		}
 		mediaDir = answers["media"]
 	}
-
-	configDir := filepath.Join(s.Root, "config")
 	uid, gid := userIDs()
-	values.Set("MEDIA_DIR", filepath.ToSlash(mediaDir))
-	values.Set("CONFIG_DIR", filepath.ToSlash(configDir))
-	values.Set("PUID", uid)
-	values.Set("PGID", gid)
-	values.SetDefault("TZ", "Europe/Paris")
-
-	progress, err := settings.ReadProgress(filepath.Join(configDir, "setup-state.json"))
-	if err != nil {
+	core.Set("MEDIA_DIR", filepath.ToSlash(mediaDir))
+	core.Set("CONFIG_DIR", filepath.ToSlash(filepath.Join(s.Root, "config")))
+	core.Set("PUID", uid)
+	core.Set("PGID", gid)
+	core.SetDefault("TZ", "Europe/Paris")
+	if err := ses.save(); err != nil {
 		return err
 	}
-	for _, a := range s.Apps {
+
+	if err := ses.assignRoles(true); err != nil {
+		return err
+	}
+	for _, a := range ses.active() {
 		if a.Configure != nil {
-			if err := a.Configure(s.env(a, values, progress)); err != nil {
+			if err := a.Configure(ses.env(a)); err != nil {
 				return err
 			}
 		}
 	}
-	s.derive(values)
-	if err := s.createDirectories(values); err != nil {
+	ses.derive()
+	if err := ses.createDirectories(); err != nil {
 		return err
 	}
-	if err := settings.Write(s.envFile(), values); err != nil {
-		return err
-	}
-
-	if err := s.writeCompose(values); err != nil {
-		return err
-	}
-	if err := shell.Compose(s.Shell, "config", "--quiet"); err != nil {
-		return err
-	}
-	if err := s.removeRetiredProject(); err != nil {
-		return err
-	}
-	if err := s.recreateNetworkIfNeeded(); err != nil {
-		return err
-	}
-	if err := s.startServices(values, progress); err != nil {
+	if err := ses.save(); err != nil {
 		return err
 	}
 
-	for _, a := range s.Apps {
-		if a.Setup != nil {
-			if err := a.Setup(s.env(a, values, progress)); err != nil {
+	if err := ses.writeCompose(); err != nil {
+		return err
+	}
+	if err := ses.runtime.Check(); err != nil {
+		return err
+	}
+	if err := ses.runtime.Prepare(); err != nil {
+		return err
+	}
+	if err := ses.startServices(); err != nil {
+		return err
+	}
+	if err := ses.waitForSignIn(); err != nil {
+		return err
+	}
+
+	for _, a := range ses.active() {
+		if impl := ses.impl(a); impl.Setup != nil {
+			if err := impl.Setup(ses.env(a)); err != nil {
 				return err
 			}
 		}
@@ -99,35 +98,7 @@ func (s *Stack) Setup() error {
 	if err := autostart.Install(s.Shell, s.UI, s.Program, s.Root); err != nil {
 		return err
 	}
-	s.UI.Say("Setup complete. Use '" + Command + " status' to inspect it.\nOpen Homepage:\n" + values.Get("ACCESS_URL"))
-	return nil
-}
-
-// migrate moves values saved under names that earlier versions used to each
-// app's current setting names, and removes what replaced apps left behind.
-func (s *Stack) migrate(values *settings.Values) error {
-	for _, a := range s.Apps {
-		for _, key := range a.RetiredSettings {
-			values.Delete(key)
-		}
-		if values.Has("CONFIG_DIR") {
-			for _, dir := range a.RetiredConfigDirs {
-				if err := os.RemoveAll(filepath.Join(values.Get("CONFIG_DIR"), filepath.FromSlash(dir))); err != nil {
-					return fmt.Errorf("Cannot remove the unused folder %s: %w", dir, err)
-				}
-			}
-		}
-		v := app.ValuesFor(values, a)
-		for old, current := range a.Renamed {
-			if !values.Has(old) {
-				continue
-			}
-			if !v.Has(current) {
-				v.Set(current, values.Get(old))
-			}
-			values.Delete(old)
-		}
-	}
+	s.UI.Say("Setup complete. Use '" + Command + " status' to inspect it.\nOpen Homepage:\n" + ses.access().URL())
 	return nil
 }
 

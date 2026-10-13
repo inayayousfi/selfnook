@@ -53,6 +53,11 @@ func (u *UI) Ask(screen flow.Screen) (flow.Answers, error) {
 			return nil, err
 		}
 		answers[field.Key] = value
+		if screen.Answered != nil {
+			if err := screen.Answered(field.Key, value); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return answers, nil
 }

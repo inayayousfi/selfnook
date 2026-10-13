@@ -9,6 +9,6 @@ services:
       TZ: "${TZ}"
       PROWLARR__SERVER__URLBASE: /prowlarr
       PROWLARR__AUTH__METHOD: External
-    network_mode: "service:${VPN_GATEWAY_SERVICE}"
+    network_mode: "${PROWLARR_NETWORK}"
     volumes:
       - "${CONFIG_DIR}/prowlarr:/config"

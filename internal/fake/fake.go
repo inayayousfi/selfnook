@@ -13,16 +13,19 @@ import (
 	"github.com/inayayousfi/selfnook/internal/shell"
 )
 
-// Shell records every command. Respond, when set, chooses each result.
+// Shell records every command and the environment values it received.
+// Respond, when set, chooses each result.
 type Shell struct {
 	mu       sync.Mutex
 	Commands [][]string
+	Envs     []map[string]string
 	Respond  func(args []string) shell.Result
 }
 
 func (s *Shell) Run(c shell.Cmd) (shell.Result, error) {
 	s.mu.Lock()
 	s.Commands = append(s.Commands, slices.Clone(c.Args))
+	s.Envs = append(s.Envs, c.Env)
 	s.mu.Unlock()
 	result := shell.Result{}
 	if s.Respond != nil {
@@ -91,6 +94,11 @@ func (u *UI) Ask(screen flow.Screen) (flow.Answers, error) {
 			value = checked
 		}
 		answers[field.Key] = value
+		if screen.Answered != nil {
+			if err := screen.Answered(field.Key, value); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return answers, nil
 }

@@ -4,15 +4,15 @@ services:
     user: "${PUID}:${PGID}"
     environment:
       TZ: "${TZ}"
-      SONARR_API_KEY: "${SONARR_API_KEY}"
-      RADARR_API_KEY: "${RADARR_API_KEY}"
+      SONARR_API_KEY: "${RECYCLARR_SERIES_API_KEY}"
+      RADARR_API_KEY: "${RECYCLARR_MOVIES_API_KEY}"
       RECYCLARR_CONFIG_DIR: /config
       RECYCLARR_DATA_DIR: /data
     volumes:
       - "${CONFIG_DIR}/recyclarr:/config"
       - "${CONFIG_DIR}/recyclarr-data:/data"
     depends_on:
-      - sonarr-app
-      - radarr-app
+      - "${RECYCLARR_SERIES}"
+      - "${RECYCLARR_MOVIES}"
     security_opt:
       - no-new-privileges:true

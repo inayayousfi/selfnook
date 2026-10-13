@@ -8,12 +8,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/inayayousfi/selfnook/internal/app"
-	"github.com/inayayousfi/selfnook/internal/apps/caddy"
 	"github.com/inayayousfi/selfnook/internal/files"
 	"github.com/inayayousfi/selfnook/internal/flow"
+	"github.com/inayayousfi/selfnook/internal/role"
 )
 
 //go:embed compose.yaml
@@ -23,43 +24,92 @@ const (
 	userKey     = "JELLYFIN_ADMIN_USER"
 	passwordKey = "JELLYFIN_ADMIN_PASS"
 	keyName     = "JELLYFIN_API_KEY"
-	baseURL     = "/jellyfin"
+	// secretKey is the secret Jellyfin's sign-in plugin shares with the
+	// sign-in service. Selfnook generates it.
+	secretKey = "JELLYFIN_OIDC_SECRET"
+	// clientID identifies Jellyfin to the sign-in service.
+	clientID = "jellyfin"
+	baseURL  = "/jellyfin"
+	service  = "jellyfin-app"
+	host     = "jellyfin"
+	port     = 8096
+	// moviesLibrary and seriesLibrary are the libraries setup creates.
+	moviesLibrary = "Movies"
+	seriesLibrary = "Shows"
 )
 
 var App = &app.App{
-	Name: "jellyfin",
+	Name:  "jellyfin",
+	Title: "Jellyfin",
 	Settings: []app.Setting{
-		{Key: userKey, Example: "replace_with_your_jellyfin_administrator_username"},
-		{Key: passwordKey, Example: "replace_with_your_jellyfin_administrator_password"},
-		{Key: keyName, Example: "replace_with_the_jellyfin_generated_api_key"},
+		{Key: userKey},
+		{Key: passwordKey},
+		{Key: keyName},
+		{Key: secretKey},
 	},
 	Renamed: map[string]string{
 		"JELLYFIN_USER": userKey,
 		"JELLYFIN_PASS": passwordKey,
 	},
-	Compose:    compose,
-	Services:   func(app.Values) []string { return []string{"jellyfin-app"} },
+	Needs:   []role.Role{role.AccessAddress, role.AdminSignIn, role.Movies, role.Series},
+	Compose: compose,
+	Environment: func(r role.Set, _ app.ComposeData) map[string]string {
+		return map[string]string{"JELLYFIN_PUBLIC_URL": role.Get(r, role.AccessAddress).URL() + baseURL}
+	},
+	Derive: func(v app.Values) {
+		if !v.Has(secretKey) {
+			v.Set(secretKey, app.RandomToken(48))
+		}
+	},
+	Services:   func(app.Values) []string { return []string{service} },
 	ConfigDirs: []string{"jellyfin", "jellyfin-cache"},
-	Prepare:    prepare,
-	Setup:      setup,
-	Routes: func(app.Values) []app.Route {
-		return []app.Route{{
-			Name:     "Jellyfin",
-			Path:     baseURL,
-			Upstream: "jellyfin-app:8096",
-			Public:   true,
-			Internal: &app.Internal{Name: "jellyfin", Port: 8096},
-		}}
-	},
-	Tiles: func(app.Values) []app.Tile {
-		return []app.Tile{{Group: "Media", Position: 1, YAML: `    - Jellyfin:
-        icon: jellyfin.png
-        server: selfnook
-        container: selfnook-jellyfin-app
-        href: "{{HOMEPAGE_VAR_URL}}/jellyfin"
-        description: Watch movies and series
-`}}
-	},
+	Images: []app.Image{{
+		Service: service,
+		Digests: map[string]string{
+			"sha256:aefb67e6a7ff1debdd154a78a7bbb780fd0c873d8639210a7f6a2016ad2b35db": "10.11.11",
+			"sha256:357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce750258a4c059d037": "12.2.0",
+		},
+		Labels: map[string]string{"10.11.11": "10.11.11", "12.2": "12.2.0"},
+		Ask: func(e *app.Env) (string, error) {
+			return app.AskVersion(e, service, "http://localhost:"+strconv.Itoa(port)+baseURL+"/System/Info/Public", "Version")
+		},
+	}},
+	Implementations: []app.Implementation{{
+		From: "12.2.0", Until: "12.2.0",
+		Provides: []role.Offer{role.Provide(role.Media, func(v role.Values, _ role.Set) role.MediaServer { return server{v} })},
+		Prepare:  prepare,
+		Setup:    setup,
+		AfterStart: func(e *app.Env) error {
+			if !e.Values.Has(keyName) {
+				return nil
+			}
+			a, err := signIn(api{e: e})
+			if err != nil {
+				return err
+			}
+			return applySignIn(a, role.Get(e.Roles, role.AccessAddress), role.Get(e.Roles, role.AdminSignIn))
+		},
+		Routes: func(app.Values, role.Set) []app.Route {
+			return []app.Route{{
+				Name:     "Jellyfin",
+				Path:     baseURL,
+				Upstream: service + ":" + strconv.Itoa(port),
+				Public:   true,
+				Internal: &app.Internal{Name: host, Port: port},
+			}}
+		},
+		Tiles: func(app.Values, role.Set) []app.Tile {
+			return []app.Tile{{Group: "Media", Position: 1, Name: "Jellyfin", Description: "Watch movies and series", Link: "/jellyfin", Service: "jellyfin-app"}}
+		},
+		Clients: func(_ app.Values, r role.Set) []app.Client {
+			return []app.Client{{
+				Name:      "Jellyfin",
+				ID:        clientID,
+				Return:    returnAddress(role.Get(r, role.AccessAddress), role.Get(r, role.AdminSignIn)),
+				SecretKey: secretKey,
+			}}
+		},
+	}},
 	Credentials: &app.CredentialGroup{Name: "jellyfin", Fields: []app.CredentialField{
 		{Label: "Administrator username", Key: userKey, Kind: app.PlainText},
 		{Label: "Administrator password", Key: passwordKey, Kind: app.Password},
@@ -67,144 +117,109 @@ var App = &app.App{
 	}},
 }
 
-// prepare sets Jellyfin's base URL while Jellyfin is stopped, because Jellyfin
-// rewrites its network file when it exits.
-func prepare(e *app.Env) ([]string, error) {
-	path := networkFile(e.ConfigDir())
-	if BaseURLIsSet(path) {
-		return nil, nil
-	}
-	if err := e.Compose("stop", "jellyfin-app"); err != nil {
-		return nil, err
-	}
-	return nil, WriteBaseURL(path)
+// server is the media server role. Other containers reach it through
+// Caddy's internal name.
+type server struct{ v role.Values }
+
+func (server) Name() string { return "Jellyfin" }
+
+func (server) Endpoint() role.Endpoint {
+	return role.Endpoint{Service: service, Host: host, Port: port}
 }
 
-// AdminUser and AdminPassword are the Jellyfin administrator login.
-func AdminUser(v app.Values) string { return v.Get(userKey) }
+func (s server) AdminUser() string     { return s.v.Get(userKey) }
+func (s server) AdminPassword() string { return s.v.Get(passwordKey) }
+func (s server) APIKey() string        { return s.v.Get(keyName) }
 
-func AdminPassword(v app.Values) string { return v.Get(passwordKey) }
+// Libraries are the libraries setup creates.
+func (server) Libraries() (string, string) { return moviesLibrary, seriesLibrary }
 
+// prepare sets Jellyfin's base URL while Jellyfin is stopped, because Jellyfin
+// rewrites its network file when it exits, and installs the sign-in plugin,
+// which Jellyfin loads when it starts.
+func prepare(e *app.Env) ([]string, error) {
+	var restart []string
+	if path := networkFile(e.ConfigDir()); !BaseURLIsSet(path) {
+		if err := e.Runtime.Stop(service); err != nil {
+			return nil, err
+		}
+		if err := WriteBaseURL(path); err != nil {
+			return nil, err
+		}
+	}
+	changed, err := installPlugin(pluginsDir(e.ConfigDir()), e.Fetch)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		restart = append(restart, service)
+	}
+	return restart, nil
+}
+
+// setup completes Jellyfin's first run, names the server, creates the
+// libraries and the API key the other apps use, and connects the sign-in plugin. It asks nothing.
 func setup(e *app.Env) error {
-	accessURL := caddy.URL(e.Values)
-	err := e.Step("jellyfin", false, func() error {
-		fields := credentialFields(e.Values)
-		answers, err := e.UI.Ask(Guide(accessURL, fields))
+	access, signInRole := role.Get(e.Roles, role.AccessAddress), role.Get(e.Roles, role.AdminSignIn)
+	movies, series := role.Get(e.Roles, role.Movies), role.Get(e.Roles, role.Series)
+	err := e.Step("jellyfin", !e.Values.Has(keyName), func() error {
+		a := api{e: e}
+		complete, err := waitReady(a)
 		if err != nil {
 			return err
 		}
-		saveAnswers(e.Values, answers)
-		if err := e.SaveValues(); err != nil {
+		if !complete {
+			if err := firstRun(a); err != nil {
+				return err
+			}
+		}
+		if a, err = signIn(a); err != nil {
 			return err
 		}
-		if answers, err = e.UI.Ask(flow.Screen{Wait: "Jellyfin", Fields: []flow.Field{flow.APIKeyField(keyName, "Jellyfin")}}); err != nil {
+		if err := ensureServerName(a); err != nil {
 			return err
 		}
-		e.Values.Set(keyName, answers[keyName])
-		return e.SaveValues()
+		if err := ensureLibraries(a, movies, series); err != nil {
+			return err
+		}
+		if err := ensureKey(a); err != nil {
+			return err
+		}
+		return applySignIn(a, access, signInRole)
 	})
 	if err != nil {
 		return err
 	}
 
-	if fields := credentialFields(e.Values); len(fields) > 0 {
-		answers, err := e.UI.Ask(flow.Screen{
-			Body:   "Record the existing Jellyfin administrator username and password in the following prompts.",
-			Fields: fields,
-		})
-		if err != nil {
-			return err
-		}
-		saveAnswers(e.Values, answers)
-		if err := e.SaveValues(); err != nil {
-			return err
-		}
-	}
-
-	if !e.Values.Has(keyName) {
-		answers, err := e.UI.Ask(flow.Screen{
-			Body:   "In Jellyfin, open Dashboard > API Keys, click New API Key, set App name to Radarr and Sonarr, then click Create. The following prompt requests the generated key.",
-			Fields: []flow.Field{flow.APIKeyField(keyName, "Jellyfin")},
-		})
-		if err != nil {
-			return err
-		}
-		e.Values.Set(keyName, answers[keyName])
-		if err := e.SaveValues(); err != nil {
-			return err
-		}
-	}
-
 	return e.Step("jellyfin-notifications", false, func() error {
-		return flow.Show(e.UI, NotificationsGuide(accessURL, e.Values.Get(keyName)))
+		screen, err := NotificationsGuide(access.URL(), server{e.Values}, movies, series)
+		if err != nil {
+			return err
+		}
+		return flow.Show(e.UI, screen)
 	})
 }
 
-// credentialFields asks only for the administrator values not saved yet.
-func credentialFields(v app.Values) []flow.Field {
-	var fields []flow.Field
-	if !v.Has(userKey) {
-		fields = append(fields, flow.UsernameField(userKey, "Jellyfin administrator"))
+// NotificationsGuide makes the libraries refresh Jellyfin after each import.
+func NotificationsGuide(accessURL string, media role.MediaServer, libraries ...role.Library) (flow.Screen, error) {
+	var links []string
+	var steps []string
+	for _, library := range libraries {
+		links = append(links, library.Name()+" link:\n"+accessURL+library.WebPath())
+		librarySteps, err := library.MediaServerSteps(media)
+		if err != nil {
+			return flow.Screen{}, err
+		}
+		steps = append(steps, librarySteps...)
 	}
-	if !v.Has(passwordKey) {
-		fields = append(fields, flow.PasswordField(passwordKey, "Jellyfin administrator"))
+	for i := range steps {
+		steps[i] = strconv.Itoa(i+1) + ". " + steps[i]
 	}
-	return fields
-}
-
-func saveAnswers(v app.Values, answers flow.Answers) {
-	for key, value := range answers {
-		v.Set(key, value)
-	}
-}
-
-// Guide walks through Jellyfin's first-run wizard, then asks for the
-// administrator login the user created there.
-func Guide(accessURL string, fields []flow.Field) flow.Screen {
-	return flow.Screen{
-		Title: "Jellyfin setup",
-		Body: `Open this link:
-` + accessURL + `/jellyfin
-
-1. Select the display language.
-2. Create the Jellyfin administrator account with the username and password requested after these steps.
-3. Add a Movies library using /media/Movies.
-4. Add a Shows library using /media/Series.
-5. Complete the remaining setup wizard pages.
-6. If some media do not appear, open Dashboard > Users > your user > Parental Control. Check the maximum allowed rating and whether items with no or unrecognized rating are blocked, then save any changes.
-7. Open Dashboard > Scheduled Tasks and run Scan Library to refresh the libraries.
-8. Open Dashboard > API Keys, click New API Key, set App name to Radarr and Sonarr, then click Create.
-9. Copy the API key that Jellyfin generated automatically. A terminal prompt after these steps will ask for it.`,
-		Fields: fields,
-	}
-}
-
-// NotificationsGuide makes Radarr and Sonarr refresh Jellyfin after each import.
-func NotificationsGuide(accessURL, apiKey string) flow.Screen {
 	return flow.Screen{
 		Title: "Jellyfin notifications",
-		Body: `Radarr link:
-` + accessURL + `/radarr
-
-Sonarr link:
-` + accessURL + `/sonarr
-
-1. In Radarr, open Settings > Connect, click +, then select Emby / Jellyfin.
-2. Name: Jellyfin
-3. Check On File Import, On File Upgrade, On Rename, On Movie Delete, On Movie File Delete, and On Movie File Delete For Upgrade.
-4. Host: jellyfin
-5. Port: 8096
-6. API Key: ` + apiKey + `
-7. Keep Update Library checked, then click Test and Save.
-8. In Sonarr, open Settings > Connect, click +, then select Emby / Jellyfin.
-9. Name: Jellyfin
-10. Check On File Import, On File Upgrade, On Import Complete, On Rename, On Series Delete, On Episode File Delete, and On Episode File Delete For Upgrade.
-11. Host: jellyfin
-12. Port: 8096
-13. API Key: ` + apiKey + `
-14. Keep Update Library checked, then click Test and Save.`,
-		Wait: "Jellyfin notification",
-	}
+		Body:  strings.Join(links, "\n\n") + "\n\n" + strings.Join(steps, "\n"),
+		Wait:  "Jellyfin notification",
+	}, nil
 }
 
 func networkFile(configDir string) string {

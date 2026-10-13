@@ -11,7 +11,7 @@ services:
       QBT_LEGAL_NOTICE: "${QBT_LEGAL_NOTICE}"
       QBT_WEBUI_PORT: "8080"
       QBT_TORRENTING_PORT: "6881"
-    network_mode: "service:${VPN_GATEWAY_SERVICE}"
+    network_mode: "${QBITTORRENT_NETWORK}"
     volumes:
       - "${CONFIG_DIR}/qbittorrent:/config"
       - "${MEDIA_DIR}:/media"
