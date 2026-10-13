@@ -1,0 +1,4 @@
+---
+selfnook:
+  host: dockerproxy
+  port: 2375

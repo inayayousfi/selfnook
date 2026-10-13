@@ -1,0 +1,17 @@
+services:
+  sonarr-app:
+    image: lscr.io/linuxserver/sonarr:latest@sha256:0deb8db6c839ac475e9cd86277712772c40ba7f929a003d7e1de36c4b666bc13
+    container_name: selfnook-sonarr-app
+    restart: unless-stopped
+    environment:
+      PUID: "${PUID}"
+      PGID: "${PGID}"
+      TZ: "${TZ}"
+      SONARR__SERVER__URLBASE: /sonarr
+      SONARR__AUTH__METHOD: External
+    volumes:
+      - "${CONFIG_DIR}/sonarr:/config"
+      - "${MEDIA_DIR}:/media"
+    depends_on:
+      - "${SONARR_DOWNLOADS}"
+      - "${SONARR_INDEXERS}"

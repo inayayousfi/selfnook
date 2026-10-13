@@ -1,0 +1,15 @@
+services:
+  jellyfin-app:
+    image: jellyfin/jellyfin:12.2@sha256:357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce750258a4c059d037
+    container_name: selfnook-jellyfin-app
+    user: "${PUID}:${PGID}"
+    restart: unless-stopped
+    environment:
+      JELLYFIN_PublishedServerUrl: "${JELLYFIN_PUBLIC_URL}"
+      HEALTHCHECK_URL: http://localhost:8096/jellyfin/health
+    ports:
+      - "7359:7359/udp"
+    volumes:
+      - "${CONFIG_DIR}/jellyfin:/config"
+      - "${CONFIG_DIR}/jellyfin-cache:/cache"
+      - "${MEDIA_DIR}:/media:ro"

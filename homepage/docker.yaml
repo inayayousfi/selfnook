@@ -1,4 +1,0 @@
----
-media-stack:
-  host: dockerproxy
-  port: 2375
