@@ -144,6 +144,10 @@ type Implementation struct {
 	// The check command restarts the app's containers when it reports one.
 	Probe func(e *Env) (string, error)
 
+	// AddUser, for an app that keeps its own login, creates an account for
+	// the person and returns what to give them to sign in.
+	AddUser func(e *Env, p Person) (string, error)
+
 	// Routes are the web addresses Caddy serves for this app.
 	Routes func(v Values, r role.Set) []Route
 
@@ -313,6 +317,12 @@ type Route struct {
 type Internal struct {
 	Name string
 	Port int
+}
+
+// Person is someone the add-user command creates accounts for.
+type Person struct {
+	Email string
+	Name  string
 }
 
 // Client is an application that signs people in through the sign-in

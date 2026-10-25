@@ -1,6 +1,7 @@
 package stack
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -354,7 +355,7 @@ func startedStack(t *testing.T, subnet string) (*Stack, *fake.Shell, *fake.UI) {
 	if err := s.Setup(); err != nil {
 		t.Fatal(err)
 	}
-	sh.Commands, sh.Envs = nil, nil
+	sh.Commands, sh.Envs, sh.Inputs = nil, nil, nil
 	sh.Respond = dockerHost(subnet)
 	ui.Events = nil
 	return s, sh, ui
@@ -931,5 +932,62 @@ func TestSetupConfiguresJellyfinWithoutQuestions(t *testing.T) {
 		if strings.HasPrefix(request, "POST /System/Configuration/branding") && !strings.Contains(request, `action=\"https://media.example.com/jellyfin/sso/OID/start/authentik\"`) {
 			t.Errorf("login button = %s", request)
 		}
+	}
+}
+
+// seerrHost answers like a running stack whose Seerr gives status to a new user.
+func seerrHost(status string) func([]string) shell.Result {
+	host := dockerHost("")
+	return func(args []string) shell.Result {
+		if strings.HasPrefix(strings.Join(args, " "), "docker exec -i selfnook-seerr node -e ") {
+			return shell.Result{Stdout: status + "\n{}\n"}
+		}
+		return host(args)
+	}
+}
+
+// Given a running stack, add-user asks for the person once, sends them to
+// Seerr on the command's input with a generated password, and shows that
+// password with the email and Seerr's address, because Seerr cannot email it.
+func TestAddUserCreatesASeerrLoginAndShowsItsPassword(t *testing.T) {
+	s, sh, ui := startedStack(t, "")
+	sh.Respond = seerrHost("201")
+	ui.Answers = map[string]string{"email": " ana@example.org ", "name": "Ana"}
+	if err := s.AddUser(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(ui.Events[:3], []string{"screen: New user", "ask: email", "ask: name"}) {
+		t.Fatalf("events = %q", ui.Events)
+	}
+	i := sh.Index("docker exec -i selfnook-seerr node -e ")
+	if i < 0 {
+		t.Fatalf("commands:\n%s", strings.Join(sh.Lines(), "\n"))
+	}
+	var sent map[string]string
+	if err := json.Unmarshal([]byte(sh.Inputs[i]), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent["email"] != "ana@example.org" || sent["username"] != "Ana" || len(sent["password"]) < 16 {
+		t.Errorf("sent = %q", sent)
+	}
+	if strings.Contains(strings.Join(sh.Commands[i], " "), sent["password"]) {
+		t.Error("the password appears in the command line")
+	}
+	said := ui.Events[len(ui.Events)-1]
+	for _, want := range []string{":5055\n", "Email: ana@example.org\n", "Password: " + sent["password"] + "\n"} {
+		if !strings.Contains(said, want) {
+			t.Errorf("said %q, want %q", said, want)
+		}
+	}
+}
+
+// Seerr refuses a second user with the same email; add-user names it.
+func TestAddUserNamesAnEmailSeerrAlreadyHas(t *testing.T) {
+	s, sh, ui := startedStack(t, "")
+	sh.Respond = seerrHost("409")
+	ui.Answers = map[string]string{"email": "ana@example.org", "name": "Ana"}
+	err := s.AddUser()
+	if err == nil || err.Error() != "Seerr already has a user with the email address ana@example.org" {
+		t.Errorf("err = %v", err)
 	}
 }

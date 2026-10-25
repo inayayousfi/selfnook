@@ -4,7 +4,10 @@ package seerr
 
 import (
 	"embed"
+	"encoding/json"
+	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/inayayousfi/selfnook/internal/app"
 	"github.com/inayayousfi/selfnook/internal/flow"
@@ -47,6 +50,7 @@ var App = &app.App{
 				return flow.Show(e.UI, screen)
 			})
 		},
+		AddUser: addUser,
 		Routes: func(app.Values, role.Set) []app.Route {
 			return []app.Route{{Name: "Seerr", Path: "/seerr", Upstream: "seerr:" + strconv.Itoa(Port), Public: true, Port: Port}}
 		},
@@ -118,4 +122,51 @@ func Guide(accessURL string, media role.MediaServer, movies, series role.Library
 27. Click Finish Setup.`,
 		Wait: "Seerr",
 	}, nil
+}
+
+// createUser runs inside Seerr's container, which has node but not curl. It
+// reads Seerr's API key from Seerr's own settings and the new user from its
+// input, so neither appears in a command line, then prints the answer's
+// status on the first line and its body after it.
+var createUser = `
+const fs = require("fs");
+const key = JSON.parse(fs.readFileSync("/app/config/settings.json", "utf8")).main.apiKey;
+fetch("http://localhost:` + strconv.Itoa(Port) + `/api/v1/user", {
+  method: "POST",
+  headers: {"X-Api-Key": key, "Content-Type": "application/json"},
+  body: fs.readFileSync(0, "utf8"),
+}).then(async (answer) => console.log(answer.status + "\n" + await answer.text()))
+  .catch((error) => { console.error(String(error)); process.exit(1); });
+`
+
+// addUser creates a Seerr user who signs in with an email address and a
+// password that Selfnook generates. Seerr shows a password only to people it
+// can email, and Selfnook does not save it.
+func addUser(e *app.Env, p app.Person) (string, error) {
+	password := app.RandomToken(18)
+	body, err := json.Marshal(map[string]string{"email": p.Email, "username": p.Name, "password": password})
+	if err != nil {
+		return "", err
+	}
+	result, err := e.Runtime.ExecInput("seerr", string(body), "node", "-e", createUser)
+	if err != nil {
+		return "", err
+	}
+	if result.Code != 0 {
+		return "", errors.New("Seerr did not answer: " + strings.TrimSpace(result.Stderr))
+	}
+	status, answer, _ := strings.Cut(strings.TrimSpace(result.Stdout), "\n")
+	switch status {
+	case "201":
+	case "409":
+		return "", errors.New("Seerr already has a user with the email address " + p.Email)
+	default:
+		return "", errors.New("Seerr answered the new user with status " + status + ": " + answer)
+	}
+	return `Seerr user created for ` + p.Name + `
+Open this link:
+` + role.Get(e.Roles, role.AccessAddress).URL() + ":" + strconv.Itoa(Port) + `
+Email: ` + p.Email + `
+Password: ` + password + `
+Selfnook does not save this password.`, nil
 }

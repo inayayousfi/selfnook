@@ -907,3 +907,71 @@ func (s *Stack) RoleStatus(r role.Role) error {
 	s.UI.Say(text)
 	return nil
 }
+
+// AddUser asks for a person's email address and name once, then creates
+// their account in every active app that keeps its own login.
+func (s *Stack) AddUser() error {
+	ses, err := s.load()
+	if err != nil {
+		return err
+	}
+	if err := ses.runtime.Ready(); err != nil {
+		return err
+	}
+	apps := ses.active()
+	if err := ses.detect(apps); err != nil {
+		return err
+	}
+	var owners []*app.App
+	for _, a := range apps {
+		if ses.impl(a).AddUser != nil {
+			owners = append(owners, a)
+		}
+	}
+	if len(owners) == 0 {
+		return errors.New("No active app keeps its own login.")
+	}
+	for _, a := range owners {
+		if a.Services == nil {
+			continue
+		}
+		running, err := ses.allRunning(a.Services(app.ValuesFor(ses.saved, a)))
+		if err != nil {
+			return err
+		}
+		if !running {
+			return errors.New(a.Title + " is not running. Run '" + Command + " start' first.")
+		}
+	}
+	answers, err := s.UI.Ask(flow.Screen{
+		Title: "New user",
+		Fields: []flow.Field{
+			{Key: "email", Prompt: "Email address", Check: func(v string) (string, error) {
+				v = strings.TrimSpace(v)
+				if !strings.Contains(v, "@") {
+					return "", errors.New("Enter an email address.")
+				}
+				return v, nil
+			}},
+			{Key: "name", Prompt: "Name", Check: func(v string) (string, error) {
+				v = strings.TrimSpace(v)
+				if v == "" {
+					return "", errors.New("Enter a name.")
+				}
+				return v, nil
+			}},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	person := app.Person{Email: answers["email"], Name: answers["name"]}
+	for _, a := range owners {
+		text, err := ses.impl(a).AddUser(ses.env(a), person)
+		if err != nil {
+			return err
+		}
+		s.UI.Say(text)
+	}
+	return nil
+}

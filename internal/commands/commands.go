@@ -70,6 +70,12 @@ var All = []Command{
 		Run:    func(s *stack.Stack, _ []string) error { return s.RoleStatus(role.VPN) },
 	},
 	{
+		Name: "add-user", Label: "Add user",
+		Help:   "Create a person's account in the apps that keep their own login.",
+		Detail: "Ask for an email address and a name, then create that person's account in every active app that keeps its own login, such as Seerr, and show the generated password once.",
+		Run:    func(s *stack.Stack, _ []string) error { return s.AddUser() },
+	},
+	{
 		Name: "credentials", Label: "Credentials",
 		Help:   "List or change the saved values of one group.",
 		Detail: "Show the saved values of one group. Answer y to type new values, pressing Enter to keep a value.",

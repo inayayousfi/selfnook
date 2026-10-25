@@ -343,6 +343,7 @@ Show every command with a short description:
 ./selfnook update -h
 ./selfnook status -h
 ./selfnook vpn-status -h
+./selfnook add-user -h
 ./selfnook credentials -h
 ```
 
@@ -365,6 +366,14 @@ Check the selected VPN gateway (Gluetun health or Tailscale exit-node availabili
 ```bash
 ./selfnook vpn-status
 ```
+
+Create a person's account in every app that keeps its own login, which is Seerr, since Seerr cannot sign people in through Authentik:
+
+```bash
+./selfnook add-user
+```
+
+It asks for the person's email address and name, then shows the Seerr address, the email, and a generated password. Selfnook does not save that password, so give it to the person right away.
 
 List saved groups, or display one group (including any saved password or API key) and change its credentials:
 
