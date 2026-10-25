@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -67,7 +68,11 @@ func (s *OS) Run(c Cmd) (Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	command := exec.CommandContext(ctx, c.Args[0], c.Args[1:]...)
+	program := c.Args[0]
+	if path, ok := Found(program); ok {
+		program = path
+	}
+	command := exec.CommandContext(ctx, program, c.Args[1:]...)
 	command.Dir = s.Dir
 	if len(c.Env) > 0 {
 		command.Env = os.Environ()
@@ -112,9 +117,26 @@ func (s *OS) Run(c Cmd) (Result, error) {
 }
 
 // Found reports whether name is on the search path, returning its full path.
+// When Go's own search fails, it also splits the search path at every
+// separator and drops double quotes, as PowerShell does. Go reads a Windows
+// search path's quotes as grouping, so one stray quote would otherwise hide
+// every folder after it.
 func Found(name string) (string, bool) {
-	path, err := exec.LookPath(name)
-	return path, err == nil
+	if path, err := exec.LookPath(name); err == nil {
+		return path, true
+	}
+	if filepath.Base(name) != name {
+		return "", false
+	}
+	for _, dir := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
+		if dir = strings.ReplaceAll(dir, `"`, ""); dir == "" {
+			continue
+		}
+		if path, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+			return path, true
+		}
+	}
+	return "", false
 }
 
 // Capture runs args, collecting output without checking the exit code.
