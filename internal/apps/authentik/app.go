@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/inayayousfi/selfnook/internal/app"
@@ -30,8 +29,9 @@ const (
 	// retiredKey lists earlier admin usernames, kept deactivated.
 	accountKey = "AUTHENTIK_ADMIN_ACCOUNT"
 	retiredKey = "AUTHENTIK_RETIRED_ADMINS"
-	// signInPort serves Authentik's own pages, including the sign-in page.
-	signInPort = 9091
+	// pagesPath serves Authentik's own pages, including the sign-in page, on
+	// the main address. AUTHENTIK_WEB__PATH in compose.yaml must match it.
+	pagesPath = "/authentik"
 	// address is where Caddy asks whether a request is signed in.
 	address = serverService + ":9000"
 	// outpostPath is where Authentik's built-in proxy answers on the main address.
@@ -103,12 +103,12 @@ var App = &app.App{
 		},
 		Routes: func(app.Values, role.Set) []app.Route {
 			return []app.Route{
-				{Upstream: address, Public: true, Port: signInPort},
+				{Path: pagesPath, Upstream: address, Public: true},
 				{Path: outpostPath, Upstream: address, Public: true},
 			}
 		},
 		Tiles: func(app.Values, role.Set) []app.Tile {
-			return []app.Tile{{Group: "Admin", Position: 6, Name: "Authentik", Description: "Manage sign-in methods and users", Link: ":" + strconv.Itoa(signInPort) + "/if/admin/", Service: serverService}}
+			return []app.Tile{{Group: "Admin", Position: 6, Name: "Authentik", Description: "Manage sign-in methods and users", Link: pagesPath + "/if/admin/", Service: serverService}}
 		},
 	}},
 	Credentials: &app.CredentialGroup{Name: "admin", Fields: []app.CredentialField{
@@ -183,7 +183,7 @@ func (s signIn) Check(proxy string) (role.Check, error) {
 }
 
 // pagesURL is the address of Authentik's own pages.
-func pagesURL(access role.Access) string { return access.URL() + ":" + strconv.Itoa(signInPort) }
+func pagesURL(access role.Access) string { return access.URL() + pagesPath }
 
 // trackAdmin retires the previous admin username when it changed, so the
 // blueprint keeps that account deactivated. It reports whether values changed.

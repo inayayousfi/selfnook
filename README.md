@@ -12,7 +12,7 @@ The setup supports Windows with Docker Desktop and native Linux.
 | --- | --- | --- |
 | Homepage | Links, container status, VPN status and Docker resource overview | `ADDRESS/` |
 | Caddy | Reverse proxy, HTTPS, and the single entry point for every web page | No web interface |
-| Authentik | Admin sign-in for the administration pages, and the place to add sign-in methods such as Google accounts | `ADDRESS:9091` |
+| Authentik | Admin sign-in for the administration pages, and the place to add sign-in methods such as Google accounts | `ADDRESS/authentik/` |
 | Docker socket proxy | Read-only container status for Homepage | No web interface |
 | Gluetun or Tailscale | Selectable qBittorrent VPN gateway | No web interface |
 | Jellyfin | Media server | `ADDRESS/jellyfin` |
@@ -34,11 +34,11 @@ The setup supports Windows with Docker Desktop and native Linux.
 
 Tailscale mode requires that Tailscale Serve does not already use HTTPS port `443` on the computer; setup and `start` stop with the removal command when it does.
 
-Caddy publishes ports `80`, `443`, `5055` (Seerr), and `9091` (sign-in). The other web interfaces no longer publish their own ports. In own-domain mode, forward TCP ports `80`, `443`, `5055`, and `9091` from the router to this computer.
+Caddy publishes ports `80`, `443`, and `5055` (Seerr). The other web interfaces no longer publish their own ports. In own-domain mode, forward TCP ports `80`, `443`, and `5055` from the router to this computer.
 
 One admin username and password protect qBittorrent, Sonarr, Radarr, Prowlarr, and the VPN country page. Those applications no longer ask for their own logins: Sonarr, Radarr, and Prowlarr use their `External` authentication method, and qBittorrent skips its login for the stack's Docker network (`172.31.250.0/24`). Jellyfin and Seerr stay outside the admin sign-in, because Jellyfin's phone and TV applications cannot pass it and Seerr is meant for the people who request media. Jellyfin's own sign-in page has a `Sign in with Authentik` button: every Authentik user can sign in with it, and members of the Authentik group `authentik Admins` become Jellyfin administrators. Seerr keeps its own login.
 
-Authentik checks the admin sign-in. Its database runs in its own PostgreSQL container and is stored in the Docker volume `selfnook_authentik-db`, not under `config/`, because PostgreSQL cannot keep its files in a folder shared with Windows. Back up that volume together with `config/`. Other sign-in methods are added in Authentik's administration pages at `ADDRESS:9091/if/admin/`: Google and other accounts under Directory > Federation and Social login. In local mode the address is unencrypted, so passkeys and Google sign-in cannot work there; setup and Authentik's sign-in page both say so.
+Authentik checks the admin sign-in. Its database runs in its own PostgreSQL container and is stored in the Docker volume `selfnook_authentik-db`, not under `config/`, because PostgreSQL cannot keep its files in a folder shared with Windows. Back up that volume together with `config/`. Other sign-in methods are added in Authentik's administration pages at `ADDRESS/authentik/if/admin/`: Google and other accounts under Directory > Federation and Social login. In local mode the address is unencrypted, so passkeys and Google sign-in cannot work there; setup and Authentik's sign-in page both say so.
 
 Containers keep reaching each other through `sonarr:8989`, `radarr:7878`, `prowlarr:9696`, and `jellyfin:8096`. Those names belong to Caddy, which adds each application's path only when the address lacks it. Saved addresses in Prowlarr, Seerr, Recyclarr, and the Jellyfin notifications therefore need no path.
 

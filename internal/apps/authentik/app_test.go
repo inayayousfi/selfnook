@@ -16,7 +16,7 @@ func TestCoverageNamesProtectedAndPublicApps(t *testing.T) {
 		{Name: "Sonarr", Path: "/sonarr"},
 		{Name: "Bazarr", Path: "/bazarr"},
 		{Name: "Tool", Port: 8000},
-		{Upstream: address, Public: true, Port: signInPort},
+		{Path: pagesPath, Upstream: address, Public: true},
 		{Upstream: "homepage:3000", Fallback: true},
 		{Name: "Jellyfin", Path: "/jellyfin", Public: true},
 	}
@@ -51,7 +51,7 @@ func TestBlueprintKeepsThePasswordOutOfTheFile(t *testing.T) {
 	if strings.Contains(file, "secret-admin-password") || !strings.Contains(file, "password: !Env ADMIN_PASS") {
 		t.Errorf("blueprint:\n%s", file)
 	}
-	for _, part := range []string{`external_host: "https://media.example.com"`, `authentik_host: "https://media.example.com:9091"`} {
+	for _, part := range []string{`external_host: "https://media.example.com"`, `authentik_host: "https://media.example.com/authentik"`} {
 		if !strings.Contains(file, part) {
 			t.Errorf("missing %s", part)
 		}

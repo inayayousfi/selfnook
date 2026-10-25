@@ -118,7 +118,7 @@ func (signInService) Check(string) (role.Check, error)    { return role.Check{},
 func (signInService) AdminGroup() string                  { return "authentik Admins" }
 func (signInService) Ready(runtime.Runtime) (bool, error) { return true, nil }
 func (signInService) Issuer(client string) string {
-	return "https://media.example.com:9091/application/o/" + client + "/"
+	return "https://media.example.com/authentik/application/o/" + client + "/"
 }
 
 type address struct{}
@@ -155,7 +155,7 @@ func TestSignInSettingsKeepAccountLinks(t *testing.T) {
 		t.Errorf("links lost: %s", sent[0])
 	}
 	want := map[string]any{
-		"OidEndpoint": "https://media.example.com:9091/application/o/jellyfin/", "OidClientId": "jellyfin", "OidSecret": "client-secret",
+		"OidEndpoint": "https://media.example.com/authentik/application/o/jellyfin/", "OidClientId": "jellyfin", "OidSecret": "client-secret",
 		"SchemeOverride": "https", "RoleClaim": "groups", "Enabled": true, "DisableHttps": false,
 	}
 	for key, value := range want {

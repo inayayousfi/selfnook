@@ -349,7 +349,7 @@ type Tile struct {
 	// Name is the app as people know it; dashboards also choose its icon by it.
 	Name        string
 	Description string
-	// Link is added to the access address, such as /radarr or :9091/if/admin/.
+	// Link is added to the access address, such as /radarr or :5055.
 	Link string
 	// Service is the Compose service whose running state the entry shows.
 	Service string

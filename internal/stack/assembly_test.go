@@ -72,21 +72,26 @@ func TestJellyfinAndHomepageStayOutsideTheSignInAndAdminPagesInside(t *testing.T
 	}
 }
 
-func TestSeerrAndSignInHaveTheirOwnPorts(t *testing.T) {
+// Seerr cannot run under a path, so it keeps its own port. Authentik's
+// pages are a path of the main address, outside the sign-in check.
+func TestSeerrHasItsOwnPortAndTheSignInPagesAPath(t *testing.T) {
 	file := caddyfile(t, "domain", "media.example.com", "gluetun")
 	for _, part := range []string{
 		"redir @seerr https://media.example.com:5055/",
 		"media.example.com:5055 {\n\treverse_proxy seerr:5055\n}",
-		"media.example.com:9091 {\n\treverse_proxy authentik-server:9000\n}",
+		"@authentik path /authentik /authentik/*\n\thandle @authentik {\n\t\treverse_proxy authentik-server:9000\n\t}",
 	} {
 		if !strings.Contains(file, part) {
-			t.Errorf("missing %q", part)
+			t.Errorf("missing %q in:\n%s", part, file)
 		}
+	}
+	if strings.Contains(file, "9091") {
+		t.Errorf("the sign-in pages still have their own port:\n%s", file)
 	}
 }
 
 // The ports Caddy publishes come from the apps that serve their own port,
-// so Seerr and the sign-in pages are reachable from outside. Port 443 is
+// so Seerr is reachable from outside, and only those ports are published. Port 443 is
 // published only when the pages use HTTPS, so an unused port cannot stop
 // Caddy from starting.
 func TestCaddyPublishesThePortsOfItsRoutes(t *testing.T) {
@@ -99,10 +104,13 @@ func TestCaddyPublishesThePortsOfItsRoutes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, port := range []string{`"80:80/tcp"`, `"5055:5055/tcp"`, `"9091:9091/tcp"`} {
+		for _, port := range []string{`"80:80/tcp"`, `"5055:5055/tcp"`} {
 			if !strings.Contains(string(content), port) {
 				t.Errorf("%s: Caddy does not publish %s:\n%s", mode, port, content)
 			}
+		}
+		if strings.Contains(string(content), "9091") {
+			t.Errorf("%s: Caddy publishes the former sign-in port:\n%s", mode, content)
 		}
 		if strings.Contains(string(content), `"443:443/tcp"`) != https {
 			t.Errorf("%s: publishing 443 is %v:\n%s", mode, !https, content)
@@ -146,7 +154,7 @@ func TestQBittorrentUsesTheSelectedGatewayAndCountryPageNeedsGluetun(t *testing.
 
 func TestTailscaleModeUsesTheTailscaleCertificate(t *testing.T) {
 	file := caddyfile(t, "tailscale", "box.tail.ts.net", "gluetun")
-	if strings.Count(file, "tls /certs/cert.pem /certs/key.pem") != 3 {
+	if strings.Count(file, "tls /certs/cert.pem /certs/key.pem") != 2 {
 		t.Errorf("each site must use the certificate:\n%s", file)
 	}
 }
